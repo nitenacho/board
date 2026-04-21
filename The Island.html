@@ -1,0 +1,704 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+  <title>The Island — Simulador</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+  <template id="__bundler_thumbnail" data-bg-color="#3d8ecc">
+    <svg viewBox="0 0 800 600" xmlns="http://www.w3.org/2000/svg">
+      <!-- Ocean background -->
+      <rect width="800" height="600" fill="#2a7fc4"/>
+      <!-- Hex grid island silhouette -->
+      <g transform="translate(400,300)">
+        <!-- Mountain center -->
+        <polygon points="0,-60 52,-30 52,30 0,60 -52,30 -52,-30" fill="#7a6b90" stroke="#4a3a6a" stroke-width="2"/>
+        <!-- Forest ring -->
+        <polygon points="0,-110 52,-80 104,-50 104,10 52,40 0,70 -52,40 -104,10 -104,-50 -52,-80" fill="#4a8c3f" stroke="#2d6b28" stroke-width="2" opacity="0.9"/>
+        <!-- Beach outer -->
+        <polygon points="0,-160 60,-130 104,-80 104,40 60,90 0,120 -60,90 -104,40 -104,-80 -60,-130" fill="#e8c87a" stroke="#c4983a" stroke-width="2" opacity="0.85"/>
+        <!-- Sea hex cells around island -->
+        <circle cx="-140" cy="-20" r="22" fill="rgba(255,255,255,0.07)" stroke="rgba(255,255,255,0.15)" stroke-width="1.5"/>
+        <circle cx="140" cy="-20" r="22" fill="rgba(255,255,255,0.07)" stroke="rgba(255,255,255,0.15)" stroke-width="1.5"/>
+        <circle cx="0" cy="-160" r="22" fill="rgba(255,255,255,0.07)" stroke="rgba(255,255,255,0.15)" stroke-width="1.5"/>
+        <!-- Meeples -->
+        <circle cx="-15" cy="-25" r="6" fill="#ff3366"/>
+        <circle cx="15" cy="-25" r="6" fill="#00e5cc"/>
+        <circle cx="0" cy="5" r="6" fill="#ffd700"/>
+        <!-- Boat -->
+        <text x="80" y="10" font-size="28" text-anchor="middle" font-family="sans-serif">⛵</text>
+        <!-- Sea creature -->
+        <circle cx="-120" cy="60" r="10" fill="#ef4444" opacity="0.8"/>
+      </g>
+      <!-- Title -->
+      <text x="400" y="560" text-anchor="middle" font-family="sans-serif" font-size="22" font-weight="700" fill="rgba(255,255,255,0.7)" letter-spacing="6">THE ISLAND</text>
+    </svg>
+  </template>
+  <style>
+    *,*::before,*::after{margin:0;padding:0;box-sizing:border-box;}
+    html,body,#root{width:100%;height:100%;overflow:hidden;font-family:'Space Grotesk',-apple-system,sans-serif;}
+    ::-webkit-scrollbar{width:4px;} ::-webkit-scrollbar-thumb{background:#ccc;border-radius:2px;}
+    @keyframes spin{to{transform:rotate(360deg);}}
+    @keyframes fadeIn{from{opacity:0;transform:translateY(4px);}to{opacity:1;transform:none;}}
+    @keyframes pulse-ring{0%,100%{opacity:0.6;r:8;}50%{opacity:1;r:11;}}
+    button:hover{filter:brightness(1.08);}
+    button:active{transform:scale(0.97);}
+    input[type=range]{-webkit-appearance:none;height:4px;border-radius:2px;background:#e5e7eb;cursor:pointer;}
+    input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;border-radius:50%;background:#2563eb;cursor:pointer;}
+  </style>
+</head>
+<body>
+<div id="root"></div>
+
+<script>
+// ── Game Data (inlined) ─────────────────────────────────────────────────────
+const PLAYER_DATA = {
+  1:{name:'Jugador 1',colorName:'Rojo',     hex:'#ff3366',bg:'rgba(255,51,102,0.1)' },
+  2:{name:'Jugador 2',colorName:'Turquesa', hex:'#00e5cc',bg:'rgba(0,229,204,0.1)'  },
+  3:{name:'Jugador 3',colorName:'Amarillo', hex:'#ffd700',bg:'rgba(255,215,0,0.1)'  },
+  4:{name:'Jugador 4',colorName:'Verde',    hex:'#39d98a',bg:'rgba(57,217,138,0.1)' },
+  5:{name:'Jugador 5',colorName:'Púrpura',  hex:'#b44dff',bg:'rgba(180,77,255,0.1)' },
+  6:{name:'Jugador 6',colorName:'Salmón',   hex:'#ff8070',bg:'rgba(255,128,112,0.1)'},
+};
+
+// 9×12 board — island centered (rows 2-6, cols 2-9); 2 sea cells border all sides
+const BOARD_TERRAIN = [
+  ['Mar','Mar','Mar','Mar','Mar','Mar','Mar','Mar','Mar','Mar','Mar','Mar'],
+  ['Mar','Mar','Mar','Mar','Mar','Mar','Mar','Mar','Mar','Mar','Mar','Mar'],
+  ['Mar','Mar','Playa','Playa','Playa','Montana','Bosque','Bosque','Bosque','Playa','Mar','Mar'],
+  ['Mar','Mar','Playa','Montana','Bosque','Bosque','Bosque','Bosque','Playa','Montana','Mar','Mar'],
+  ['Mar','Mar','Montana','Bosque','Playa','Bosque','Bosque','Bosque','Montana','Bosque','Mar','Mar'],
+  ['Mar','Mar','Bosque','Bosque','Montana','Montana','Playa','Playa','Montana','Bosque','Mar','Mar'],
+  ['Mar','Mar','Playa','Playa','Playa','Playa','Playa','Bosque','Playa','Playa','Mar','Mar'],
+  ['Mar','Mar','Mar','Mar','Mar','Mar','Mar','Mar','Mar','Mar','Mar','Mar'],
+  ['Mar','Mar','Mar','Mar','Mar','Mar','Mar','Mar','Mar','Mar','Mar','Mar'],
+];
+
+const TILES_INIT = [
+  {id:1,tipo:'Playa',  altura:1,accion:'INM_Barco',    r:2,c:2},{id:2,tipo:'Playa',  altura:1,accion:'INM_Barco',    r:2,c:3},
+  {id:3,tipo:'Playa',  altura:1,accion:'INM_Barco',    r:2,c:4},{id:4,tipo:'Montana', altura:3,accion:'INM_Volcan',   r:2,c:5},
+  {id:5,tipo:'Bosque', altura:2,accion:'MAN_Vientos',  r:2,c:6},{id:6,tipo:'Bosque', altura:2,accion:'INM_Barco',    r:2,c:7},
+  {id:7,tipo:'Bosque', altura:2,accion:'INM_Tiburon',  r:2,c:8},{id:8,tipo:'Playa',  altura:1,accion:'INM_Ballena',  r:2,c:9},
+  {id:9,tipo:'Playa',  altura:1,accion:'INM_Remolino', r:3,c:2},{id:10,tipo:'Montana',altura:3,accion:'MAN_Delfin',  r:3,c:3},
+  {id:11,tipo:'Bosque',altura:2,accion:'MAN_Vientos',  r:3,c:4},{id:12,tipo:'Bosque',altura:2,accion:'INM_Barco',    r:3,c:5},
+  {id:13,tipo:'Bosque',altura:2,accion:'MAN_Ballena',  r:3,c:6},{id:14,tipo:'Bosque',altura:2,accion:'INM_Tiburon',  r:3,c:7},
+  {id:15,tipo:'Playa', altura:1,accion:'INM_Remolino', r:3,c:8},{id:16,tipo:'Montana',altura:3,accion:'INM_Tiburon', r:3,c:9},
+  {id:17,tipo:'Montana',altura:3,accion:'MAN_Delfin',  r:4,c:2},{id:18,tipo:'Bosque',altura:2,accion:'INM_Barco',    r:4,c:3},
+  {id:19,tipo:'Playa', altura:1,accion:'MAN_Serpiente',r:4,c:4},{id:20,tipo:'Bosque',altura:2,accion:'MAN_Vientos',  r:4,c:5},
+  {id:21,tipo:'Bosque',altura:2,accion:'INM_Tiburon',  r:4,c:6},{id:22,tipo:'Bosque',altura:2,accion:'MAN_Tiburon',  r:4,c:7},
+  {id:23,tipo:'Montana',altura:3,accion:'DEF_Tiburon', r:4,c:8},{id:24,tipo:'Bosque',altura:2,accion:'INM_Ballena',  r:4,c:9},
+  {id:25,tipo:'Bosque',altura:2,accion:'INM_Barco',    r:5,c:2},{id:26,tipo:'Bosque',altura:2,accion:'INM_Barco',    r:5,c:3},
+  {id:27,tipo:'Montana',altura:3,accion:'INM_Barco',   r:5,c:4},{id:28,tipo:'Montana',altura:3,accion:'INM_Barco',   r:5,c:5},
+  {id:29,tipo:'Playa', altura:1,accion:'INM_Remolino', r:5,c:6},{id:30,tipo:'Playa', altura:1,accion:'INM_Ballena',  r:5,c:7},
+  {id:31,tipo:'Montana',altura:3,accion:'INM_Barco',   r:5,c:8},{id:32,tipo:'Bosque',altura:2,accion:'INM_Ballena',  r:5,c:9},
+  {id:33,tipo:'Playa', altura:1,accion:'INM_Remolino', r:6,c:2},{id:34,tipo:'Playa', altura:1,accion:'INM_Ballena',  r:6,c:3},
+  {id:35,tipo:'Playa', altura:1,accion:'MAN_Serpiente',r:6,c:4},{id:36,tipo:'Playa', altura:1,accion:'MAN_Delfin',   r:6,c:5},
+  {id:37,tipo:'Playa', altura:1,accion:'INM_Tiburon',  r:6,c:6},{id:38,tipo:'Bosque',altura:2,accion:'INM_Barco',    r:6,c:7},
+  {id:39,tipo:'Playa', altura:1,accion:'DEF_Ballena',  r:6,c:8},{id:40,tipo:'Playa', altura:1,accion:'INM_Remolino', r:6,c:9},
+];
+
+const ACTION_INFO = {
+  INM_Barco:    {label:'Barco',       color:'#60a5fa',symbol:'⛵',desc:'Coloca un barco en el mar adyacente'},
+  INM_Volcan:   {label:'¡VOLCÁN!',    color:'#ef4444',symbol:'🌋',desc:'Volcán revelado — fin del juego'},
+  INM_Tiburon:  {label:'Tiburón',     color:'#f97316',symbol:'◆',desc:'Coloca un tiburón en el mar adyacente'},
+  INM_Ballena:  {label:'Ballena',     color:'#3b82f6',symbol:'◉',desc:'Coloca una ballena en el mar adyacente'},
+  INM_Remolino: {label:'Remolino',    color:'#8b5cf6',symbol:'◎',desc:'El remolino hunde barcos y nadadores'},
+  MAN_Vientos:  {label:'Vientos',     color:'#94a3b8',symbol:'≋',desc:'Mueve un barco hasta 2 espacios'},
+  MAN_Delfin:   {label:'Delfín',      color:'#22d3ee',symbol:'◑',desc:'Mueve un delfín (lleva exploradores)'},
+  MAN_Serpiente:{label:'Serpiente',   color:'#a3e635',symbol:'~',desc:'Mueve una serpiente marina'},
+  MAN_Ballena:  {label:'Mv.Ballena',  color:'#3b82f6',symbol:'◉',desc:'Mueve una ballena existente'},
+  MAN_Tiburon:  {label:'Mv.Tiburón',  color:'#f97316',symbol:'◆',desc:'Mueve un tiburón existente'},
+  DEF_Tiburon:  {label:'Def.Tiburón', color:'#f97316',symbol:'◈',desc:'Defiéndete de un tiburón'},
+  DEF_Ballena:  {label:'Def.Ballena', color:'#3b82f6',symbol:'◎',desc:'Defiéndete de una ballena'},
+};
+
+const CREATURES_INIT = [
+  {id:'S1',tipo:'Serpiente',r:0,c:2,estado:'activo'},{id:'S2',tipo:'Serpiente',r:0,c:9,estado:'activo'},
+  {id:'S3',tipo:'Serpiente',r:4,c:0,estado:'activo'},{id:'S4',tipo:'Serpiente',r:7,c:2,estado:'activo'},
+  {id:'S5',tipo:'Serpiente',r:7,c:9,estado:'activo'},
+  {id:'T1',tipo:'Tiburon',r:null,c:null,estado:'reserva'},{id:'T2',tipo:'Tiburon',r:null,c:null,estado:'reserva'},
+  {id:'T3',tipo:'Tiburon',r:null,c:null,estado:'reserva'},{id:'T4',tipo:'Tiburon',r:null,c:null,estado:'reserva'},
+  {id:'T5',tipo:'Tiburon',r:null,c:null,estado:'reserva'},
+  {id:'B1',tipo:'Ballena',r:null,c:null,estado:'reserva'},{id:'B2',tipo:'Ballena',r:null,c:null,estado:'reserva'},
+  {id:'B3',tipo:'Ballena',r:null,c:null,estado:'reserva'},
+  {id:'D1',tipo:'Delfin',r:null,c:null,estado:'reserva'},{id:'D2',tipo:'Delfin',r:null,c:null,estado:'reserva'},
+];
+
+const HAND_TILE_TYPES = [
+  {id:'vientos',  label:'Vientos',   symbol:'≋',color:'#64748b',desc:'Mueve un barco 2 espacios extra'},
+  {id:'delfin',   label:'Delfín',    symbol:'◑',color:'#0ea5e9',desc:'Lleva explorador en delfín'},
+  {id:'serpiente',label:'Serpiente', symbol:'〜',color:'#84cc16',desc:'Mueve una serpiente'},
+  {id:'tiburon',  label:'Tiburón',   symbol:'◆',color:'#f97316',desc:'Mueve un tiburón'},
+  {id:'ballena',  label:'Ballena',   symbol:'●',color:'#3b82f6',desc:'Mueve una ballena'},
+  {id:'remolino', label:'Remolino',  symbol:'◎',color:'#8b5cf6',desc:'Activa un remolino'},
+  {id:'defensa',  label:'Defensa',   symbol:'◈',color:'#10b981',desc:'Protege un explorador'},
+  {id:'remo',     label:'Remo Extra',symbol:'⟿',color:'#f59e0b',desc:'Gana 2 puntos de mov.'},
+];
+const EXPLORER_VALUES=[1,1,1,2,2,3,3,4,5,6];
+const DICE_MAP=['Tiburon','Tiburon','Serpiente','Serpiente','Ballena','Ballena'];
+const PHASE_INFO=[
+  {id:1,label:'Ficha de Mano',  desc:'Juega una ficha de tu mano (opcional)'},
+  {id:2,label:'Movimiento',     desc:'Mueve exploradores o barcos (3 puntos)'},
+  {id:3,label:'Retirar Terreno',desc:'Retira una ficha del borde de la isla'},
+  {id:4,label:'Dado & Criatura',desc:'Lanza el dado y mueve la criatura'},
+];
+
+function generateHand(n=3){return[...HAND_TILE_TYPES].sort(()=>Math.random()-0.5).slice(0,n).map((t,i)=>({...t,uid:`${t.id}_${i}_${Date.now()}`}));}
+function isIslandCell(r,c){return r>=2&&r<=6&&c>=2&&c<=9;}
+function isSeaCell(r,c){return!isIslandCell(r,c);}
+function getAdjacentCells(r,c){return[[r-1,c],[r+1,c],[r,c-1],[r,c+1]].filter(([a,b])=>a>=0&&a<9&&b>=0&&b<12);}
+function getEdgeTiles(tiles){
+  const rm=new Set(tiles.filter(t=>t.removed||t.removing).map(t=>`${t.r},${t.c}`));
+  return tiles.filter(t=>{if(t.removed||t.removing)return false;return getAdjacentCells(t.r,t.c).some(([a,b])=>isSeaCell(a,b)||rm.has(`${a},${b}`));});
+}
+function createInitialExplorers(numPlayers){
+  const out=[],tpp=Math.floor(40/numPlayers);
+  for(let p=1;p<=numPlayers;p++){const si=(p-1)*tpp;for(let i=0;i<10;i++){const tile=TILES_INIT[(si+i)%40];out.push({id:(p-1)*10+i+1,player:p,value:EXPLORER_VALUES[i],r:tile.r,c:tile.c,state:'tierra'});}}
+  return out;
+}
+</script>
+
+<script type="text/babel">
+const{useState,useCallback,useEffect,useMemo,useRef}=React;
+
+// ── Hex grid math ────────────────────────────────────────────────────────────
+const HS = 34;                        // circumradius
+const HW = Math.sqrt(3) * HS;        // pointy-top: width = √3·r
+const SVG_W = HW * 12.5;
+const SVG_H = HS * 14;
+
+function hCtr(r,c){ return[HW*0.5+c*HW+(r&1)*HW*0.5, HS+r*HS*1.5]; }
+function hPts(cx,cy){ return Array.from({length:6},(_,i)=>{const a=Math.PI/3*i-Math.PI/6;return`${(cx+HS*Math.cos(a)).toFixed(1)},${(cy+HS*Math.sin(a)).toFixed(1)}`;}).join(' '); }
+
+// Terrain fills: [lightFill, lightStroke, darkFill, darkStroke]
+const TC={
+  Mar:    ['rgba(255,255,255,0.07)','rgba(255,255,255,0.14)','rgba(0,0,0,0.15)','rgba(255,255,255,0.07)'],
+  Playa:  ['#e8c87a','#c4983a','#5a4012','#8a6020'],
+  Bosque: ['#4a8c3f','#2d6b28','#1c4818','#2d6b28'],
+  Montana:['#8a7ba0','#5e4d7a','#2c2040','#4a3462'],
+};
+function tf(t,dark,i){return(TC[t]||TC.Mar)[dark?i+2:i];}
+
+// Creature config
+const CC={
+  Serpiente:{bg:'#84cc16',brd:'#4d7c0f',ic:'〜'},
+  Tiburon:  {bg:'#ef4444',brd:'#991b1b',ic:'▲'},
+  Ballena:  {bg:'#3b82f6',brd:'#1d4ed8',ic:'●'},
+  Delfin:   {bg:'#06b6d4',brd:'#0e7490',ic:'◑'},
+};
+
+// ── SVG tokens ───────────────────────────────────────────────────────────────
+function SvgMeeple({x,y,color,sz=7}){
+  return(
+    <g transform={`translate(${x},${y})`}>
+      <circle cx={0} cy={-sz} r={sz*.56} fill={color}/>
+      <path d={`M${-sz*.72},${-sz*.24} Q${-sz*.95},${sz*.38} ${-sz*.55},${sz*.88} L${-sz*.2},${sz*.88} L${-sz*.2},${sz*1.65} L${sz*.2},${sz*1.65} L${sz*.2},${sz*.88} L${sz*.55},${sz*.88} Q${sz*.95},${sz*.38} ${sz*.72},${-sz*.24} Q${sz*.3},${-sz*.58} 0,${-sz*.38} Q${-sz*.3},${-sz*.58} ${-sz*.72},${-sz*.24}Z`} fill={color}/>
+    </g>
+  );
+}
+function SvgCreature({x,y,tipo,selected,onClick}){
+  const cfg=CC[tipo]||{bg:'#888',brd:'#555',ic:'?'};
+  return(
+    <g transform={`translate(${x},${y})`} onClick={e=>{e.stopPropagation();onClick?.();}} style={{cursor:'pointer'}}>
+      <circle cx={0} cy={0} r={8} fill={cfg.bg} stroke={selected?'#fff':cfg.brd} strokeWidth={selected?2.5:1.5}/>
+      {selected&&<circle cx={0} cy={0} r={11} fill="none" stroke="#fff" strokeWidth={1} opacity={0.5}/>}
+      <text x={0} y={3.5} textAnchor="middle" fontSize={9} fill="#fff" fontWeight="bold" fontFamily="sans-serif">{cfg.ic}</text>
+    </g>
+  );
+}
+
+// ── Hex cell ─────────────────────────────────────────────────────────────────
+function HexCell({r,c,terrain,tile,explorers,creatures,boats,selected,movable,removable,onSelect,onCreatureClick,selectedCreature,showLabels,dark}){
+  const[cx,cy]=hCtr(r,c);
+  const pts=hPts(cx,cy);
+  const isIsland=tile&&!tile.removed&&!tile.removing;
+  const isRemoving=tile?.removing;
+
+  let fill=tf(terrain,dark,0), stroke=tf(terrain,dark,1), sw=isIsland?1.5:0.8;
+  if(selected){stroke='#fbbf24';sw=2.5;}
+  else if(removable){stroke='#f97316';sw=2.5;}
+  else if(movable){stroke='#22d3ee';sw=2;}
+
+  const crits=creatures.filter(cr=>cr.r===r&&cr.c===c&&cr.estado==='activo');
+
+  // explorer layout: up to 4 in a 2×2
+  const offsets=[[-9,-5],[9,-5],[-9,7],[9,7]];
+
+  return(
+    <g onClick={()=>onSelect(r,c)} style={{cursor:'pointer',opacity:isRemoving?0:1,transition:'opacity 0.5s ease'}}>
+      <polygon points={pts} fill={fill} stroke={stroke} strokeWidth={sw}/>
+      {selected&&<polygon points={pts} fill="rgba(251,191,36,0.15)" stroke="#fbbf24" strokeWidth={3.5} opacity={0.5}/>}
+      {removable&&<polygon points={pts} fill="rgba(249,115,22,0.12)" stroke="#f97316" strokeWidth={2.5} strokeDasharray="5 3"/>}
+      {movable&&<polygon points={pts} fill="rgba(34,211,238,0.14)"/>}
+
+      {/* Height pips */}
+      {isIsland&&[...Array(tile.altura)].map((_,i)=>(
+        <circle key={i} cx={cx-HS*.52+i*7} cy={cy-HS*.56} r={3} fill={dark?'rgba(255,255,255,0.55)':tf(terrain,false,1)} stroke="rgba(0,0,0,0.25)" strokeWidth={0.5}/>
+      ))}
+
+      {/* Action symbol */}
+      {isIsland&&ACTION_INFO[tile.accion]&&(
+        <text x={cx+HS*.44} y={cy-HS*.42} textAnchor="middle" fontSize={9.5} fontWeight="700" fill={ACTION_INFO[tile.accion].color} fontFamily="sans-serif">{ACTION_INFO[tile.accion].symbol}</text>
+      )}
+
+      {/* Meeples */}
+      {explorers.slice(0,4).map((e,i)=>(
+        <SvgMeeple key={e.id} x={cx+offsets[i][0]} y={cy+offsets[i][1]} color={PLAYER_DATA[e.player]?.hex||'#888'} sz={7}/>
+      ))}
+      {explorers.length>4&&<text x={cx} y={cy+2} textAnchor="middle" fontSize={8} fill="#fff" fontWeight="bold" fontFamily="monospace">+{explorers.length-4}</text>}
+
+      {/* Creatures */}
+      {crits.map((cr,i)=>(
+        <SvgCreature key={cr.id} x={cx+(i-(crits.length-1)*0.5)*18} y={cy+HS*.38} tipo={cr.tipo} selected={selectedCreature===cr.id} onClick={()=>onCreatureClick(cr)}/>
+      ))}
+
+      {/* Boat */}
+      {boats.slice(0,1).map(b=>(
+        <text key={b.id} x={cx} y={cy+4} textAnchor="middle" fontSize={HS*.42} fontFamily="sans-serif">⛵</text>
+      ))}
+
+      {/* Label */}
+      {showLabels&&(
+        <text x={cx} y={cy+HS*.7} textAnchor="middle" fontSize={6.5} fill={isIsland?'rgba(0,0,0,0.28)':'rgba(255,255,255,0.22)'} fontFamily="monospace">{r+1},{c+1}</text>
+      )}
+    </g>
+  );
+}
+
+// ── Hex Board ────────────────────────────────────────────────────────────────
+function HexBoard({tiles,explorers,creatures,boats,selected,movableSet,removableSet,onSelectCell,onCreatureClick,selectedCreature,showLabels,dark}){
+  const tileMap={},expMap={},boatMap={};
+  tiles.forEach(t=>{tileMap[`${t.r},${t.c}`]=t;});
+  explorers.forEach(e=>{const k=`${e.r},${e.c}`;(expMap[k]=expMap[k]||[]).push(e);});
+  boats.forEach(b=>{const k=`${b.r},${b.c}`;(boatMap[k]=boatMap[k]||[]).push(b);});
+  const [oa,ob]=dark?['#060e1e','#0a1628']:['#3d8ecc','#1a5fa0'];
+  return(
+    <svg viewBox={`0 0 ${SVG_W.toFixed(0)} ${SVG_H.toFixed(0)}`} width="100%" height="100%" style={{display:'block',maxHeight:'100%'}}>
+      <defs>
+        <radialGradient id="og" cx="50%" cy="50%" r="65%">
+          <stop offset="0%" stopColor={oa}/><stop offset="100%" stopColor={ob}/>
+        </radialGradient>
+        {/* Wave pattern */}
+        <pattern id="waves" x="0" y="0" width="20" height="14" patternUnits="userSpaceOnUse">
+          <path d="M0 7 Q5 4 10 7 Q15 10 20 7" fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth="1"/>
+        </pattern>
+      </defs>
+      <rect width={SVG_W} height={SVG_H} fill="url(#og)"/>
+      <rect width={SVG_W} height={SVG_H} fill="url(#waves)"/>
+      {BOARD_TERRAIN.map((row,r)=>row.map((terrain,c)=>{
+        const key=`${r},${c}`;
+        return(
+          <HexCell key={key} r={r} c={c} terrain={terrain}
+            tile={tileMap[key]} explorers={expMap[key]||[]}
+            creatures={creatures} boats={boatMap[key]||[]}
+            selected={selected===key} movable={movableSet.has(key)}
+            removable={removableSet.has(key)} onSelect={onSelectCell}
+            onCreatureClick={onCreatureClick} selectedCreature={selectedCreature}
+            showLabels={showLabels} dark={dark}/>
+        );
+      }))}
+    </svg>
+  );
+}
+
+// ── HUD helpers ──────────────────────────────────────────────────────────────
+function bS(bg,fg,bd){return{background:bg,color:fg||'#fff',border:`1.5px solid ${bd||bg}`,padding:'9px 14px',borderRadius:6,fontSize:11,fontWeight:700,textTransform:'uppercase',letterSpacing:'0.06em',cursor:'pointer',width:'100%',fontFamily:'inherit',transition:'all 0.15s'};}
+
+function PhaseStep({phase,current,th}){
+  const active=phase.id===current,done=phase.id<current;
+  return(
+    <div style={{display:'flex',alignItems:'flex-start',gap:10,opacity:active?1:done?0.55:0.28,transition:'opacity 0.3s'}}>
+      <div style={{width:22,height:22,borderRadius:'50%',flexShrink:0,marginTop:1,background:active?'#2563eb':done?'#d1fae5':th.card,border:`1.5px solid ${active?'#2563eb':done?'#10b981':th.border}`,boxShadow:active?'0 2px 8px rgba(37,99,235,0.4)':'none',display:'flex',alignItems:'center',justifyContent:'center',fontSize:9,fontWeight:700,color:active?'#fff':done?'#059669':th.muted,transition:'all 0.3s'}}>
+        {done?'✓':phase.id}
+      </div>
+      <div style={{paddingTop:2}}>
+        <div style={{fontSize:12,fontWeight:active?600:400,color:active?th.text:th.muted}}>{phase.label}</div>
+        {active&&<div style={{fontSize:10,color:th.muted,marginTop:2,lineHeight:1.4}}>{phase.desc}</div>}
+      </div>
+    </div>
+  );
+}
+
+function ScoreRow({player,scores,currentPlayer,numPlayers,th}){
+  if(player>numPlayers)return null;
+  const p=PLAYER_DATA[player],isA=player===currentPlayer;
+  return(
+    <div style={{display:'flex',alignItems:'center',gap:8,padding:'4px 8px',borderRadius:6,background:isA?`${p.hex}18`:'transparent',border:`1px solid ${isA?p.hex+'44':'transparent'}`,transition:'all 0.3s'}}>
+      <div style={{width:8,height:8,borderRadius:'50%',background:p.hex,boxShadow:isA?`0 0 6px ${p.hex}`:'none',flexShrink:0}}/>
+      <span style={{flex:1,fontSize:11,color:isA?th.text:th.muted,fontWeight:isA?600:400}}>{p.name} <span style={{fontWeight:400,color:th.muted,fontSize:10}}>({p.colorName})</span></span>
+      <span style={{fontSize:13,fontWeight:700,color:isA?p.hex:th.muted,fontFamily:'monospace'}}>{scores[player]||0}</span>
+      <span style={{fontSize:9,color:th.muted}}>pts</span>
+    </div>
+  );
+}
+
+function DiceDisplay({result,rolling,th}){
+  const L={Tiburon:{label:'TIBURÓN',color:'#ef4444',symbol:'◆'},Serpiente:{label:'SERPIENTE',color:'#84cc16',symbol:'〜'},Ballena:{label:'BALLENA',color:'#3b82f6',symbol:'●'}};
+  const info=result?L[result]:null;
+  return(
+    <div style={{border:`1.5px solid ${th.border}`,borderRadius:8,padding:'10px 14px',textAlign:'center',background:th.card}}>
+      <div style={{fontSize:9,color:th.muted,textTransform:'uppercase',letterSpacing:'0.1em',marginBottom:8}}>Dado de Criaturas</div>
+      <div style={{fontSize:36,lineHeight:1,animation:rolling?'spin 0.35s linear infinite':'none',color:info?info.color:th.muted,filter:info?`drop-shadow(0 2px 6px ${info.color}66)`:'none'}}>{rolling?'◌':info?info.symbol:'◌'}</div>
+      {info&&!rolling&&<div style={{fontSize:12,color:info.color,fontWeight:700,marginTop:6,letterSpacing:'0.04em'}}>{info.label}</div>}
+      {info&&<div style={{fontSize:10,color:th.muted,marginTop:4}}>Selecciona y mueve la criatura en el tablero</div>}
+    </div>
+  );
+}
+
+function HandCard({card,onPlay,disabled,th}){
+  const[hov,setHov]=useState(false);
+  return(
+    <div onClick={()=>!disabled&&onPlay(card)} onMouseEnter={()=>setHov(true)} onMouseLeave={()=>setHov(false)}
+      style={{flex:1,minWidth:58,maxWidth:82,background:hov&&!disabled?th.bg:th.card,border:`1.5px solid ${hov&&!disabled?card.color:th.border}`,borderRadius:8,padding:'9px 5px 7px',textAlign:'center',cursor:disabled?'default':'pointer',opacity:disabled?0.4:1,transition:'all 0.15s',boxShadow:hov&&!disabled?`0 3px 10px rgba(0,0,0,0.1)`:th.shadow||'none',transform:hov&&!disabled?'translateY(-2px)':'none',userSelect:'none'}} title={card.desc}>
+      <div style={{fontSize:18,marginBottom:3,lineHeight:1,color:card.color}}>{card.symbol}</div>
+      <div style={{fontSize:8.5,fontWeight:700,color:th.text,lineHeight:1.3}}>{card.label}</div>
+    </div>
+  );
+}
+
+function ActionLog({entries,th}){
+  const ref=useRef(null);
+  useEffect(()=>{if(ref.current)ref.current.scrollTop=ref.current.scrollHeight;},[entries]);
+  return(
+    <div>
+      <div style={{fontSize:9,color:th.muted,textTransform:'uppercase',letterSpacing:'0.1em',marginBottom:6}}>Log de Eventos</div>
+      <div ref={ref} style={{maxHeight:130,overflowY:'auto',fontFamily:'monospace',fontSize:10,color:th.muted,lineHeight:1.7,background:th.card,borderRadius:6,padding:'7px 10px',border:`1px solid ${th.border}`}}>
+        {entries.map((e,i)=>(
+          <div key={i} style={{color:e.type==='action'?'#059669':e.type==='warn'?'#d97706':e.type==='error'?'#dc2626':th.muted}}>
+            <span style={{color:th.border}}>›</span> {e.text}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function SelectedInfo({info,th}){
+  if(!info)return null;
+  const hasContent=info.tile||info.explorers?.length>0||info.creatures?.length>0;
+  if(!hasContent)return(
+    <div style={{padding:'8px 12px',background:th.card,border:`1.5px solid ${th.border}`,borderRadius:8}}>
+      <div style={{fontSize:11,fontWeight:600,color:th.text}}>{info.coord}</div>
+      <div style={{fontSize:10,color:th.muted,marginTop:2}}>Mar — casilla de agua</div>
+    </div>
+  );
+  return(
+    <div style={{padding:'10px 12px',background:th.card,border:`1.5px solid #fde68a`,borderRadius:8}}>
+      <div style={{fontSize:9,color:'#d97706',textTransform:'uppercase',letterSpacing:'0.1em',marginBottom:5}}>Seleccionado</div>
+      <div style={{fontSize:13,fontWeight:600,color:th.text,marginBottom:5}}>{info.coord}</div>
+      {info.tile&&!info.tile.removed&&(
+        <div style={{display:'flex',gap:6,flexWrap:'wrap',marginBottom:4}}>
+          <span style={{fontSize:10,padding:'2px 7px',borderRadius:10,background:info.tile.tipo==='Playa'?'#e8c87a':info.tile.tipo==='Bosque'?'#4a8c3f':'#8a7ba0',color:info.tile.tipo==='Playa'?'#7a5a18':info.tile.tipo==='Bosque'?'#fff':'#fff',fontWeight:600}}>{info.tile.tipo} h{info.tile.altura}</span>
+          {info.tile.accion&&<span style={{fontSize:10,color:ACTION_INFO[info.tile.accion]?.color,fontWeight:600}}>{ACTION_INFO[info.tile.accion]?.symbol} {ACTION_INFO[info.tile.accion]?.label}</span>}
+        </div>
+      )}
+      {info.explorers?.length>0&&<div style={{display:'flex',gap:4,flexWrap:'wrap'}}>{info.explorers.map(e=><span key={e.id} style={{fontSize:10,padding:'1px 6px',borderRadius:10,background:`${PLAYER_DATA[e.player]?.hex}22`,color:PLAYER_DATA[e.player]?.hex,border:`1px solid ${PLAYER_DATA[e.player]?.hex}44`,fontWeight:600}}>J{e.player}</span>)}</div>}
+    </div>
+  );
+}
+
+function TweakToggle({label,value,onChange,th}){
+  return(
+    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
+      <span style={{fontSize:11,color:th.text}}>{label}</span>
+      <div onClick={()=>onChange(!value)} style={{width:34,height:20,borderRadius:10,background:value?'#2563eb':th.border,cursor:'pointer',position:'relative',transition:'background 0.2s',flexShrink:0}}>
+        <div style={{position:'absolute',top:3,left:value?16:3,width:14,height:14,borderRadius:'50%',background:'#fff',transition:'left 0.2s',boxShadow:'0 1px 3px rgba(0,0,0,0.2)'}}/>
+      </div>
+    </div>
+  );
+}
+
+// ── App ──────────────────────────────────────────────────────────────────────
+const TWEAK_DEFAULTS=/*EDITMODE-BEGIN*/{
+  "showValues": true,
+  "highlightEdge": true,
+  "showLabels": true,
+  "zoom": 1.4
+}/*EDITMODE-END*/;
+
+function createState(n){
+  const hands={};for(let p=1;p<=n;p++)hands[p]=generateHand(3);
+  return{numPlayers:n,currentPlayer:1,turn:1,phase:1,
+    tiles:TILES_INIT.map(t=>({...t,removed:false,removing:false})),
+    explorers:createInitialExplorers(n),
+    creatures:CREATURES_INIT.map(c=>({...c})),
+    boats:[],hands,
+    scores:Object.fromEntries(Array.from({length:n},(_,i)=>[i+1,0])),
+    log:[{type:'info',text:'¡La isla emerge del mar! Partida iniciada.'},{type:'action',text:'Turno 01 — Jugador 1 comienza.'}],
+    movePts:3,diceResult:null,diceRolling:false,
+    selectedCell:null,selectedExplorer:null,selectedCreature:null,
+    phaseDone:false,gameOver:false};
+}
+
+function App(){
+  const[gs,setGs]=useState(()=>{try{const s=JSON.parse(localStorage.getItem('island_v3'));return s||createState(4);}catch{return createState(4);}});
+  const[tweaks,setTweaks]=useState(()=>{try{return JSON.parse(localStorage.getItem('island_tweaks'))||{...TWEAK_DEFAULTS};}catch{return{...TWEAK_DEFAULTS};}});
+  const[dark,setDark]=useState(()=>{try{return JSON.parse(localStorage.getItem('island_dark'))||false;}catch{return false;}});
+  const[showTweaks,setShowTweaks]=useState(false);
+
+  useEffect(()=>{localStorage.setItem('island_v3',JSON.stringify(gs));},[gs]);
+  useEffect(()=>{localStorage.setItem('island_tweaks',JSON.stringify(tweaks));window.parent.postMessage({type:'__edit_mode_set_keys',edits:tweaks},'*');},[tweaks]);
+  useEffect(()=>{localStorage.setItem('island_dark',JSON.stringify(dark));},[dark]);
+  useEffect(()=>{const h=e=>{if(e.data?.type==='__activate_edit_mode')setShowTweaks(true);if(e.data?.type==='__deactivate_edit_mode')setShowTweaks(false);};window.addEventListener('message',h);window.parent.postMessage({type:'__edit_mode_available'},'*');return()=>window.removeEventListener('message',h);},[]);
+
+  // Theme
+  const th=dark?{bg:'#0d1018',border:'#1e293b',text:'#f0f4f8',muted:'#64748b',card:'#111827',shadow:'none',accent:'#3b82f6'}
+                :{bg:'#faf9f6',border:'#e8e0d4',text:'#111827',muted:'#9ca3af',card:'#f5f3ef',shadow:'0 1px 3px rgba(0,0,0,0.06)',accent:'#2563eb'};
+
+  const addLog=useCallback((text,type='action')=>{setGs(p=>({...p,log:[...p.log.slice(-59),{type,text}]}));},[]);
+
+  const removableSet=useMemo(()=>{const s=new Set();if(gs.phase!==3)return s;getEdgeTiles(gs.tiles).forEach(t=>s.add(`${t.r},${t.c}`));return s;},[gs.phase,gs.tiles]);
+
+  const movableSet=useMemo(()=>{const s=new Set();if(gs.phase===2&&gs.selectedExplorer){const e=gs.explorers.find(e=>e.id===gs.selectedExplorer);if(e)getAdjacentCells(e.r,e.c).forEach(([r,c])=>s.add(`${r},${c}`));}if(gs.phase===4&&gs.selectedCreature&&gs.diceResult){const cr=gs.creatures.find(c=>c.id===gs.selectedCreature);if(cr&&cr.r!==null)getAdjacentCells(cr.r,cr.c).filter(([r,c])=>isSeaCell(r,c)).forEach(([r,c])=>s.add(`${r},${c}`));}return s;},[gs.phase,gs.selectedExplorer,gs.selectedCreature,gs.diceResult,gs.explorers,gs.creatures]);
+
+  const selectedInfo=useMemo(()=>{if(!gs.selectedCell)return null;const[r,c]=gs.selectedCell.split(',').map(Number);return{coord:`F${r+1} · C${c+1}`,tile:gs.tiles.find(t=>t.r===r&&t.c===c&&!t.removed),explorers:gs.explorers.filter(e=>e.r===r&&e.c===c&&e.state!=='salvado'&&e.state!=='eliminado'),creatures:gs.creatures.filter(cr=>cr.r===r&&cr.c===c&&cr.estado==='activo'),boats:gs.boats.filter(b=>b.r===r&&b.c===c)};},[gs.selectedCell,gs.tiles,gs.explorers,gs.creatures,gs.boats]);
+
+  const handleSelectCell=useCallback((r,c)=>{
+    const key=`${r},${c}`;
+    setGs(prev=>{
+      const base={...prev,selectedCell:prev.selectedCell===key?null:key};
+      // Phase 4: move creature
+      if(prev.phase===4&&prev.selectedCreature&&prev.diceResult&&movableSet.has(key)){
+        addLog(`Criatura movida a F${r+1}C${c+1}.`);
+        return{...base,creatures:prev.creatures.map(cr=>cr.id===prev.selectedCreature?{...cr,r,c}:cr),selectedCreature:null};
+      }
+      // Phase 2: move explorer
+      if(prev.phase===2){
+        if(prev.selectedExplorer&&movableSet.has(key)){
+          const onLand=isIslandCell(r,c)&&prev.tiles.find(t=>t.r===r&&t.c===c&&!t.removed);
+          const newPts=prev.movePts-1;
+          addLog(`J${prev.currentPlayer} → F${r+1}C${c+1} (${onLand?'tierra':'agua'}). ${newPts} pts.`);
+          return{...base,explorers:prev.explorers.map(e=>e.id===prev.selectedExplorer?{...e,r,c,state:onLand?'tierra':'nadando'}:e),movePts:newPts,selectedExplorer:null};
+        }
+        const mine=prev.explorers.filter(e=>e.r===r&&e.c===c&&e.player===prev.currentPlayer&&e.state!=='salvado'&&e.state!=='eliminado');
+        if(mine.length>0){addLog(`Explorador seleccionado en F${r+1}C${c+1}.`,'info');return{...base,selectedExplorer:mine[0].id};}
+        return{...base,selectedExplorer:null};
+      }
+      // Phase 3: remove tile
+      if(prev.phase===3&&removableSet.has(key)){
+        const tile=prev.tiles.find(t=>t.r===r&&t.c===c&&!t.removed);
+        if(!tile)return base;
+        addLog(`Terreno retirado: ${tile.tipo} h${tile.altura} en F${r+1}C${c+1}.`,'warn');
+        addLog(`↳ Revelado: ${ACTION_INFO[tile.accion]?.label} — ${ACTION_INFO[tile.accion]?.desc}`);
+        const removingTiles=prev.tiles.map(t=>t.id===tile.id?{...t,removing:true}:t);
+        setTimeout(()=>{
+          setGs(p2=>{
+            const finalTiles=p2.tiles.map(t=>t.id===tile.id?{...t,removing:false,removed:true}:t);
+            let newBoats=[...p2.boats],newCreatures=[...p2.creatures];
+            if(tile.accion==='INM_Barco'){const adj=getAdjacentCells(r,c).find(([ar,ac])=>isSeaCell(ar,ac));if(adj)newBoats=[...newBoats,{id:`bt_${Date.now()}`,r:adj[0],c:adj[1],capacity:3,explorers:[]}];}
+            if(tile.accion==='INM_Tiburon'){const rv=newCreatures.find(c=>c.tipo==='Tiburon'&&c.estado==='reserva');if(rv){const adj=getAdjacentCells(r,c).find(([ar,ac])=>isSeaCell(ar,ac));if(adj)newCreatures=newCreatures.map(c=>c.id===rv.id?{...c,r:adj[0],c:adj[1],estado:'activo'}:c);}}
+            if(tile.accion==='INM_Ballena'){const rv=newCreatures.find(c=>c.tipo==='Ballena'&&c.estado==='reserva');if(rv){const adj=getAdjacentCells(r,c).find(([ar,ac])=>isSeaCell(ar,ac));if(adj)newCreatures=newCreatures.map(c=>c.id===rv.id?{...c,r:adj[0],c:adj[1],estado:'activo'}:c);}}
+            return{...p2,tiles:finalTiles,boats:newBoats,creatures:newCreatures,phaseDone:true,gameOver:tile.accion==='INM_Volcan'};
+          });
+        },560);
+        return{...prev,tiles:removingTiles,selectedCell:key};
+      }
+      addLog(`Celda F${r+1}C${c+1}.`,'info');
+      return base;
+    });
+  },[movableSet,removableSet,addLog]);
+
+  const handleCreatureClick=useCallback((cr)=>{
+    if(gs.phase!==4||!gs.diceResult)return;
+    addLog(`${cr.tipo} ${cr.id} seleccionado.`,'info');
+    setGs(p=>({...p,selectedCreature:cr.id===p.selectedCreature?null:cr.id}));
+  },[gs.phase,gs.diceResult,addLog]);
+
+  const handleNextPhase=useCallback(()=>{
+    setGs(prev=>{
+      if(prev.gameOver)return prev;
+      const next=prev.phase<4?prev.phase+1:1;
+      const isNew=prev.phase===4;
+      const np=isNew?(prev.currentPlayer%prev.numPlayers)+1:prev.currentPlayer;
+      const nt=isNew?prev.turn+1:prev.turn;
+      const hands=isNew?{...prev.hands,[np]:generateHand(3)}:prev.hands;
+      const msg=isNew?`── Turno ${nt} — J${np} (${PLAYER_DATA[np].colorName}) ──`:`Fase ${next} — ${PHASE_INFO[next-1].label}.`;
+      return{...prev,phase:next,currentPlayer:np,turn:nt,movePts:3,diceResult:null,diceRolling:false,selectedExplorer:null,selectedCreature:null,selectedCell:null,phaseDone:false,hands,log:[...prev.log.slice(-59),{type:'action',text:msg}]};
+    });
+  },[]);
+
+  const handleRollDice=useCallback(()=>{
+    setGs(p=>({...p,diceRolling:true,selectedCreature:null}));
+    setTimeout(()=>{const roll=Math.floor(Math.random()*6);const r=DICE_MAP[roll];setGs(p=>({...p,diceRolling:false,diceResult:r}));addLog(`Dado: ${r.toUpperCase()} (${roll+1}) — mueve la criatura en el tablero.`,'warn')},700);
+  },[addLog]);
+
+  const handlePlayCard=useCallback((card)=>{
+    setGs(p=>({...p,hands:{...p.hands,[p.currentPlayer]:(p.hands[p.currentPlayer]||[]).filter(c=>c.uid!==card.uid)},log:[...p.log.slice(-59),{type:'action',text:`J${p.currentPlayer} juega: ${card.label} — ${card.desc}`}]}));
+  },[]);
+
+  const newGame=(np)=>{localStorage.removeItem('island_v3');setGs(createState(np||gs.numPlayers));};
+
+  const tilesLeft=gs.tiles.filter(t=>!t.removed&&!t.removing).length;
+  const swimming=gs.explorers.filter(e=>e.state==='nadando').length;
+  const saved=gs.explorers.filter(e=>e.state==='salvado').length;
+
+  // Merge movable sets
+  const allMovable=useMemo(()=>{if(gs.phase===4&&gs.selectedCreature)return movableSet;if(gs.phase===2&&gs.selectedExplorer)return movableSet;return new Set();},[gs.phase,gs.selectedCreature,gs.selectedExplorer,movableSet]);
+  const showRemovable=gs.phase===3||(tweaks.highlightEdge&&gs.phase!==2&&gs.phase!==4);
+
+  return(
+    <div style={{display:'flex',width:'100%',height:'100%',overflow:'hidden',background:dark?'#060910':'#3d8ecc',transition:'background 0.4s'}}>
+
+      {/* Board */}
+      <main style={{flex:1,display:'flex',flexDirection:'column',overflow:'hidden',position:'relative'}}>
+        {/* Top bar */}
+        <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'7px 14px',background:'rgba(0,0,0,0.2)',backdropFilter:'blur(4px)',borderBottom:'1px solid rgba(255,255,255,0.1)',flexShrink:0}}>
+          <div style={{display:'flex',alignItems:'center',gap:14}}>
+            <div style={{fontSize:13,fontWeight:800,color:'#fff',letterSpacing:'0.1em',textTransform:'uppercase',textShadow:'0 1px 4px rgba(0,0,0,0.4)'}}>🏝 The Island</div>
+            <div style={{width:1,height:16,background:'rgba(255,255,255,0.2)'}}/>
+            <TopStat label="Tiles" value={tilesLeft} max={40}/>
+            <TopStat label="Nadando" value={swimming} color="#fde68a"/>
+            <TopStat label="Salvados" value={saved} color="#86efac"/>
+          </div>
+          <div style={{display:'flex',gap:6}}>
+            <button onClick={()=>setDark(d=>!d)} style={{background:'rgba(255,255,255,0.12)',border:'1px solid rgba(255,255,255,0.25)',borderRadius:4,padding:'4px 10px',fontSize:10,color:'#fff',cursor:'pointer',fontFamily:'inherit',fontWeight:600,letterSpacing:'0.05em'}}>
+              {dark?'☀ Claro':'🌙 Oscuro'}
+            </button>
+            <button onClick={()=>newGame()} style={{background:'rgba(255,255,255,0.08)',border:'1px solid rgba(255,255,255,0.18)',borderRadius:4,padding:'4px 10px',fontSize:10,color:'rgba(255,255,255,0.7)',cursor:'pointer',fontFamily:'inherit'}}>Nueva Partida</button>
+            <button onClick={()=>setShowTweaks(s=>!s)} style={{background:showTweaks?'rgba(255,255,255,0.22)':'rgba(255,255,255,0.08)',border:'1px solid rgba(255,255,255,0.22)',borderRadius:4,padding:'4px 10px',fontSize:10,color:'rgba(255,255,255,0.85)',cursor:'pointer',fontFamily:'inherit',fontWeight:600}}>Tweaks</button>
+          </div>
+        </div>
+
+        {/* SVG hex board */}
+        <div style={{flex:1,display:'flex',alignItems:'center',justifyContent:'center',padding:'12px 16px',overflow:'hidden',position:'relative'}}>
+          <div style={{width:`${tweaks.zoom*100}%`,maxWidth:`${tweaks.zoom*900}px`,height:'100%',display:'flex',alignItems:'center',justifyContent:'center'}}>
+            <HexBoard
+              tiles={gs.tiles}
+              explorers={gs.explorers.filter(e=>e.state!=='salvado'&&e.state!=='eliminado')}
+              creatures={gs.creatures} boats={gs.boats}
+              selected={gs.selectedCell} movableSet={allMovable}
+              removableSet={showRemovable?removableSet:new Set()}
+              onSelectCell={handleSelectCell} onCreatureClick={handleCreatureClick}
+              selectedCreature={gs.selectedCreature} showLabels={tweaks.showLabels} dark={dark}
+            />
+          </div>
+        </div>
+
+        {/* Phase strip */}
+        <div style={{display:'flex',flexShrink:0,background:'rgba(0,0,0,0.18)',backdropFilter:'blur(4px)',borderTop:'1px solid rgba(255,255,255,0.08)'}}>
+          {PHASE_INFO.map(ph=>(
+            <div key={ph.id} style={{flex:1,padding:'5px 6px',textAlign:'center',background:gs.phase===ph.id?'rgba(255,255,255,0.14)':'transparent',borderRight:'1px solid rgba(255,255,255,0.07)',transition:'background 0.3s'}}>
+              <div style={{fontSize:8.5,fontWeight:700,textTransform:'uppercase',letterSpacing:'0.07em',color:gs.phase===ph.id?'#fff':'rgba(255,255,255,0.3)'}}>{ph.id}. {ph.label}</div>
+            </div>
+          ))}
+        </div>
+      </main>
+
+      {/* HUD */}
+      <aside style={{width:290,flexShrink:0,background:th.bg,borderLeft:`1.5px solid ${th.border}`,display:'flex',flexDirection:'column',height:'100%',overflow:'hidden',transition:'background 0.4s, border-color 0.4s'}}>
+        {/* Player header */}
+        <div style={{padding:'13px 16px',borderBottom:`1.5px solid ${th.border}`,background:`linear-gradient(135deg,${PLAYER_DATA[gs.currentPlayer].hex}18 0%,transparent 100%)`,flexShrink:0}}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start'}}>
+            <div>
+              <div style={{fontSize:9,color:th.muted,textTransform:'uppercase',letterSpacing:'0.12em',marginBottom:4}}>Jugador Activo</div>
+              <div style={{display:'flex',alignItems:'center',gap:8}}>
+                <svg width={18} height={27} viewBox="0 0 20 30">
+                  <circle cx={10} cy={6} r={5.5} fill={PLAYER_DATA[gs.currentPlayer].hex}/>
+                  <path d={`M3.5 14 Q1 20 4.5 24 L8 24 L8 29 L12 29 L12 24 L15.5 24 Q19 20 16.5 14 Q13.5 11 10 11 Q6.5 11 3.5 14Z`} fill={PLAYER_DATA[gs.currentPlayer].hex}/>
+                </svg>
+                <div>
+                  <div style={{fontSize:15,fontWeight:700,color:th.text}}>{PLAYER_DATA[gs.currentPlayer].name}</div>
+                  <div style={{fontSize:10,color:PLAYER_DATA[gs.currentPlayer].hex,fontWeight:600}}>{PLAYER_DATA[gs.currentPlayer].colorName}</div>
+                </div>
+              </div>
+            </div>
+            <div style={{textAlign:'right'}}>
+              <div style={{fontSize:9,color:th.muted,textTransform:'uppercase',letterSpacing:'0.12em',marginBottom:4}}>Turno</div>
+              <div style={{fontSize:22,fontWeight:700,color:th.text,fontFamily:'monospace'}}>{String(gs.turn).padStart(2,'0')}</div>
+            </div>
+          </div>
+        </div>
+
+        {/* Content */}
+        <div style={{flex:1,overflowY:'auto',padding:'12px 16px',display:'flex',flexDirection:'column',gap:12}}>
+          {/* Phases */}
+          <div>
+            <div style={{fontSize:9,color:th.muted,textTransform:'uppercase',letterSpacing:'0.12em',marginBottom:9}}>Fases del Turno</div>
+            <div style={{display:'flex',flexDirection:'column',gap:7}}>{PHASE_INFO.map(ph=><PhaseStep key={ph.id} phase={ph} current={gs.phase} th={th}/>)}</div>
+          </div>
+          {/* Phase widgets */}
+          {gs.phase===1&&gs.hands?.[gs.currentPlayer]&&(
+            <div>
+              <div style={{fontSize:9,color:th.muted,textTransform:'uppercase',letterSpacing:'0.1em',marginBottom:8}}>Fichas en mano</div>
+              <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>{(gs.hands[gs.currentPlayer]||[]).map(card=><HandCard key={card.uid} card={card} onPlay={handlePlayCard} disabled={false} th={th}/>)}</div>
+            </div>
+          )}
+          {gs.phase===2&&(
+            <div style={{padding:'9px 12px',background:dark?'rgba(16,185,129,0.08)':'#f0fdf4',border:`1.5px solid ${dark?'rgba(16,185,129,0.2)':'#bbf7d0'}`,borderRadius:8}}>
+              <div style={{fontSize:9,color:th.muted,textTransform:'uppercase',letterSpacing:'0.1em',marginBottom:7}}>Puntos de Movimiento</div>
+              <div style={{display:'flex',gap:5,marginBottom:5}}>{[1,2,3].map(i=><div key={i} style={{flex:1,height:7,borderRadius:4,background:i<=gs.movePts?'#10b981':th.border,boxShadow:i<=gs.movePts?'0 1px 4px rgba(16,185,129,0.4)':'none',transition:'all 0.2s'}}/>)}</div>
+              <div style={{fontSize:10,color:th.muted}}>{gs.movePts}/3 puntos restantes</div>
+            </div>
+          )}
+          {gs.phase===4&&<DiceDisplay result={gs.diceResult} rolling={gs.diceRolling} th={th}/>}
+          <SelectedInfo info={selectedInfo} th={th}/>
+          {/* Scores */}
+          <div>
+            <div style={{fontSize:9,color:th.muted,textTransform:'uppercase',letterSpacing:'0.12em',marginBottom:7}}>Puntuación</div>
+            <div style={{display:'flex',flexDirection:'column',gap:2}}>{[1,2,3,4,5,6].map(i=><ScoreRow key={i} player={i} scores={gs.scores} currentPlayer={gs.currentPlayer} numPlayers={gs.numPlayers} th={th}/>)}</div>
+          </div>
+          <ActionLog entries={gs.log} th={th}/>
+        </div>
+
+        {/* Buttons */}
+        <div style={{padding:'10px 16px',borderTop:`1.5px solid ${th.border}`,flexShrink:0,display:'flex',flexDirection:'column',gap:7}}>
+          {gs.phase===4&&!gs.diceResult&&<button onClick={handleRollDice} style={bS(th.accent)}>◎ Lanzar Dado</button>}
+          {(gs.phase!==4||gs.diceResult)&&<button onClick={handleNextPhase} style={bS(th.accent)}>{gs.phase===1?'→ Siguiente Fase':gs.phase===2?'✓ Fin Movimiento':gs.phase===3?'✓ Confirmar Retiro':'✓ Fin Turno'}</button>}
+          <button onClick={()=>{addLog(`J${gs.currentPlayer} omite la fase ${gs.phase}.`,'info');handleNextPhase();}} style={bS('transparent',th.muted,th.border)}>Omitir Fase</button>
+        </div>
+      </aside>
+
+      {/* Tweaks panel */}
+      {showTweaks&&(
+        <div style={{position:'absolute',bottom:52,right:298,width:228,background:th.bg,border:`1.5px solid ${th.border}`,borderRadius:10,padding:'14px 16px',zIndex:200,boxShadow:'0 8px 32px rgba(0,0,0,0.25)',animation:'fadeIn 0.18s ease-out'}}>
+          <div style={{fontSize:11,color:th.accent,fontWeight:800,letterSpacing:'0.1em',marginBottom:14,textTransform:'uppercase'}}>Tweaks</div>
+          <TweakToggle label="Mostrar valores" value={tweaks.showValues} onChange={v=>setTweaks(t=>({...t,showValues:v}))} th={th}/>
+          <TweakToggle label="Resaltar borde isla" value={tweaks.highlightEdge} onChange={v=>setTweaks(t=>({...t,highlightEdge:v}))} th={th}/>
+          <TweakToggle label="Coordenadas" value={tweaks.showLabels} onChange={v=>setTweaks(t=>({...t,showLabels:v}))} th={th}/>
+          <div style={{marginTop:12,fontSize:9,color:th.muted,textTransform:'uppercase',letterSpacing:'0.1em',marginBottom:6}}>Zoom tablero</div>
+          <input type="range" min={0.6} max={1.4} step={0.05} value={tweaks.zoom} onChange={e=>setTweaks(t=>({...t,zoom:parseFloat(e.target.value)}))} style={{width:'100%',accentColor:th.accent}}/>
+          <div style={{fontSize:10,color:th.muted,textAlign:'right',marginTop:3}}>{Math.round(tweaks.zoom*100)}%</div>
+          <div style={{marginTop:12,fontSize:9,color:th.muted,textTransform:'uppercase',letterSpacing:'0.1em',marginBottom:7}}>Jugadores</div>
+          <div style={{display:'flex',gap:4}}>{[2,3,4,5,6].map(n=><button key={n} onClick={()=>newGame(n)} style={{flex:1,padding:'5px 0',fontSize:11,background:gs.numPlayers===n?th.accent:'transparent',border:`1.5px solid ${gs.numPlayers===n?th.accent:th.border}`,borderRadius:5,color:gs.numPlayers===n?'#fff':th.muted,cursor:'pointer',fontFamily:'inherit',fontWeight:700,transition:'all 0.15s'}}>{n}</button>)}</div>
+        </div>
+      )}
+
+      {/* Game Over */}
+      {gs.gameOver&&(
+        <div style={{position:'absolute',inset:0,zIndex:300,background:'rgba(0,0,0,0.75)',backdropFilter:'blur(8px)',display:'flex',alignItems:'center',justifyContent:'center',animation:'fadeIn 0.4s ease-out'}}>
+          <div style={{textAlign:'center',padding:40,maxWidth:460,width:'90%',background:th.bg,borderRadius:16,boxShadow:'0 24px 64px rgba(0,0,0,0.4)'}}>
+            <div style={{fontSize:52,marginBottom:12}}>🌋</div>
+            <div style={{fontSize:26,fontWeight:800,color:'#dc2626',marginBottom:8}}>¡Volcán Revelado!</div>
+            <div style={{fontSize:13,color:th.muted,marginBottom:28}}>La isla se hunde. Fin de la partida.</div>
+            <div style={{display:'flex',gap:8,justifyContent:'center',marginBottom:28,flexWrap:'wrap'}}>
+              {Array.from({length:gs.numPlayers},(_,i)=>i+1).map(p=>{
+                const pd=PLAYER_DATA[p];
+                return(<div key={p} style={{padding:'10px 16px',borderRadius:10,border:`2px solid ${pd.hex}44`,background:`${pd.hex}12`}}>
+                  <div style={{fontSize:10,fontWeight:700,color:pd.hex,marginBottom:3}}>{pd.name}</div>
+                  <div style={{fontSize:20,fontWeight:800,color:th.text,fontFamily:'monospace'}}>{gs.scores[p]||0} <span style={{fontSize:10,fontWeight:400,color:th.muted}}>pts</span></div>
+                </div>);
+              })}
+            </div>
+            <button onClick={()=>newGame()} style={bS('#2563eb')}>🏝 Nueva Partida</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TopStat({label,value,max,color}){
+  return(<div style={{display:'flex',alignItems:'center',gap:4}}>
+    <span style={{fontSize:9,color:'rgba(255,255,255,0.5)',textTransform:'uppercase',letterSpacing:'0.08em'}}>{label}</span>
+    <span style={{fontSize:13,fontWeight:700,color:color||'#fff',fontFamily:'monospace',textShadow:color?`0 0 8px ${color}88`:'none'}}>{value}{max?`/${max}`:''}</span>
+  </div>);
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
