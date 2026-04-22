@@ -128,7 +128,9 @@ function Cell({
   const cfg = TERRAIN_CONFIG[terrain] || TERRAIN_CONFIG.Mar;
   const isIsland = tile && !tile.removed && !tile.removing;
   const isRemoving = tile?.removing;
-  const isSea = !isIsland && !isRemoving;
+  const isMainland = terrain === 'Mainland';
+  const isSea = !isIsland && !isRemoving && !isMainland;
+  const isCenter = r === ISLAND_CENTER.r && c === ISLAND_CENTER.c;
 
   let borderColor = cfg.border;
   let glowShadow = 'none';
@@ -151,7 +153,9 @@ function Cell({
 
   const cellStyle = {
     position:'relative',
-    background: isRemoving ? 'rgba(255,255,255,0.15)'
+    background: isMainland
+      ? 'repeating-linear-gradient(45deg,#d9c9a7 0 6px,#c6b48a 6px 12px)'
+      : isRemoving ? 'rgba(255,255,255,0.15)'
       : isIsland ? cfg.bg
       : isSea ? 'rgba(255,255,255,0.04)'
       : cfg.bg,
@@ -184,6 +188,21 @@ function Cell({
       {isIsland && <HeightPips altura={tile.altura} />}
       {isIsland && <ActionBadge accion={tile.accion} />}
       {isRemoving && <SinkOverlay />}
+
+      {isMainland && (
+        <div style={{
+          position:'absolute', top:2, left:0, right:0, textAlign:'center',
+          fontSize:8, fontWeight:700, color:'#5a3f14',
+          textTransform:'uppercase', letterSpacing:'0.1em', pointerEvents:'none',
+        }}>Safe</div>
+      )}
+      {isCenter && !isIsland && (
+        <div style={{
+          position:'absolute', inset:0, display:'flex',
+          alignItems:'center', justifyContent:'center',
+          fontSize:22, color:'rgba(132,204,22,0.35)', pointerEvents:'none',
+        }}>〜</div>
+      )}
 
       {/* Tokens cluster */}
       <div style={{

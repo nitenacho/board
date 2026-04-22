@@ -65,41 +65,59 @@ const PLAYER_DATA = {
   6:{name:'Jugador 6',colorName:'Salmón',   hex:'#ff8070',bg:'rgba(255,128,112,0.1)'},
 };
 
-// 9×12 board — island centered (rows 2-6, cols 2-9); 2 sea cells border all sides
-const BOARD_TERRAIN = [
-  ['Mar','Mar','Mar','Mar','Mar','Mar','Mar','Mar','Mar','Mar','Mar','Mar'],
-  ['Mar','Mar','Mar','Mar','Mar','Mar','Mar','Mar','Mar','Mar','Mar','Mar'],
-  ['Mar','Mar','Playa','Playa','Playa','Montana','Bosque','Bosque','Bosque','Playa','Mar','Mar'],
-  ['Mar','Mar','Playa','Montana','Bosque','Bosque','Bosque','Bosque','Playa','Montana','Mar','Mar'],
-  ['Mar','Mar','Montana','Bosque','Playa','Bosque','Bosque','Bosque','Montana','Bosque','Mar','Mar'],
-  ['Mar','Mar','Bosque','Bosque','Montana','Montana','Playa','Playa','Montana','Bosque','Mar','Mar'],
-  ['Mar','Mar','Playa','Playa','Playa','Playa','Playa','Bosque','Playa','Playa','Mar','Mar'],
-  ['Mar','Mar','Mar','Mar','Mar','Mar','Mar','Mar','Mar','Mar','Mar','Mar'],
-  ['Mar','Mar','Mar','Mar','Mar','Mar','Mar','Mar','Mar','Mar','Mar','Mar'],
-];
+// ── Hex-ring island geometry ───────────────────────────────────────────────
+// 9×12 board. Island is concentric rings around (4,5). Mainland at 4 corners.
+const BOARD_ROWS = 9, BOARD_COLS = 12;
+const ISLAND_CENTER = { r:4, c:5 };
+const MAINLAND_CORNERS = [[0,0],[0,11],[8,0],[8,11]];
 
-const TILES_INIT = [
-  {id:1,tipo:'Playa',  altura:1,accion:'INM_Barco',    r:2,c:2},{id:2,tipo:'Playa',  altura:1,accion:'INM_Barco',    r:2,c:3},
-  {id:3,tipo:'Playa',  altura:1,accion:'INM_Barco',    r:2,c:4},{id:4,tipo:'Montana', altura:3,accion:'INM_Volcan',   r:2,c:5},
-  {id:5,tipo:'Bosque', altura:2,accion:'MAN_Vientos',  r:2,c:6},{id:6,tipo:'Bosque', altura:2,accion:'INM_Barco',    r:2,c:7},
-  {id:7,tipo:'Bosque', altura:2,accion:'INM_Tiburon',  r:2,c:8},{id:8,tipo:'Playa',  altura:1,accion:'INM_Ballena',  r:2,c:9},
-  {id:9,tipo:'Playa',  altura:1,accion:'INM_Remolino', r:3,c:2},{id:10,tipo:'Montana',altura:3,accion:'MAN_Delfin',  r:3,c:3},
-  {id:11,tipo:'Bosque',altura:2,accion:'MAN_Vientos',  r:3,c:4},{id:12,tipo:'Bosque',altura:2,accion:'INM_Barco',    r:3,c:5},
-  {id:13,tipo:'Bosque',altura:2,accion:'MAN_Ballena',  r:3,c:6},{id:14,tipo:'Bosque',altura:2,accion:'INM_Tiburon',  r:3,c:7},
-  {id:15,tipo:'Playa', altura:1,accion:'INM_Remolino', r:3,c:8},{id:16,tipo:'Montana',altura:3,accion:'INM_Tiburon', r:3,c:9},
-  {id:17,tipo:'Montana',altura:3,accion:'MAN_Delfin',  r:4,c:2},{id:18,tipo:'Bosque',altura:2,accion:'INM_Barco',    r:4,c:3},
-  {id:19,tipo:'Playa', altura:1,accion:'MAN_Serpiente',r:4,c:4},{id:20,tipo:'Bosque',altura:2,accion:'MAN_Vientos',  r:4,c:5},
-  {id:21,tipo:'Bosque',altura:2,accion:'INM_Tiburon',  r:4,c:6},{id:22,tipo:'Bosque',altura:2,accion:'MAN_Tiburon',  r:4,c:7},
-  {id:23,tipo:'Montana',altura:3,accion:'DEF_Tiburon', r:4,c:8},{id:24,tipo:'Bosque',altura:2,accion:'INM_Ballena',  r:4,c:9},
-  {id:25,tipo:'Bosque',altura:2,accion:'INM_Barco',    r:5,c:2},{id:26,tipo:'Bosque',altura:2,accion:'INM_Barco',    r:5,c:3},
-  {id:27,tipo:'Montana',altura:3,accion:'INM_Barco',   r:5,c:4},{id:28,tipo:'Montana',altura:3,accion:'INM_Barco',   r:5,c:5},
-  {id:29,tipo:'Playa', altura:1,accion:'INM_Remolino', r:5,c:6},{id:30,tipo:'Playa', altura:1,accion:'INM_Ballena',  r:5,c:7},
-  {id:31,tipo:'Montana',altura:3,accion:'INM_Barco',   r:5,c:8},{id:32,tipo:'Bosque',altura:2,accion:'INM_Ballena',  r:5,c:9},
-  {id:33,tipo:'Playa', altura:1,accion:'INM_Remolino', r:6,c:2},{id:34,tipo:'Playa', altura:1,accion:'INM_Ballena',  r:6,c:3},
-  {id:35,tipo:'Playa', altura:1,accion:'MAN_Serpiente',r:6,c:4},{id:36,tipo:'Playa', altura:1,accion:'MAN_Delfin',   r:6,c:5},
-  {id:37,tipo:'Playa', altura:1,accion:'INM_Tiburon',  r:6,c:6},{id:38,tipo:'Bosque',altura:2,accion:'INM_Barco',    r:6,c:7},
-  {id:39,tipo:'Playa', altura:1,accion:'DEF_Ballena',  r:6,c:8},{id:40,tipo:'Playa', altura:1,accion:'INM_Remolino', r:6,c:9},
-];
+// Odd-r offset → cube coords, hex distance.
+function _toCube(r,c){const x=c-((r-(r&1))>>1),z=r,y=-x-z;return[x,y,z];}
+function hexDistance(r1,c1,r2,c2){const[x1,y1,z1]=_toCube(r1,c1),[x2,y2,z2]=_toCube(r2,c2);return(Math.abs(x1-x2)+Math.abs(y1-y2)+Math.abs(z1-z2))/2;}
+function ringOf(r,c){return hexDistance(r,c,ISLAND_CENTER.r,ISLAND_CENTER.c);}
+function isCornerCell(r,c){return MAINLAND_CORNERS.some(([a,b])=>a===r&&b===c);}
+
+// Terrain by ring: 0=sea (center serpent lair), 1=Montana, 2=Bosque, 3=Playa, 4+=Mar.
+const BOARD_TERRAIN = (()=>{
+  const g=[];
+  for(let r=0;r<BOARD_ROWS;r++){
+    const row=[];
+    for(let c=0;c<BOARD_COLS;c++){
+      if(isCornerCell(r,c)){row.push('Mainland');continue;}
+      const d=ringOf(r,c);
+      if(d===0) row.push('Mar');
+      else if(d===1) row.push('Montana');
+      else if(d===2) row.push('Bosque');
+      else if(d===3) row.push('Playa');
+      else row.push('Mar');
+    }
+    g.push(row);
+  }
+  return g;
+})();
+
+// Deterministic action pool per terrain.
+const _ACTION_POOL = {
+  Playa:  ['INM_Barco','INM_Remolino','INM_Ballena','DEF_Ballena','MAN_Serpiente','MAN_Delfin','INM_Tiburon','INM_Barco','INM_Remolino','INM_Ballena','MAN_Serpiente','INM_Tiburon','INM_Barco','INM_Remolino','INM_Ballena','DEF_Ballena','MAN_Delfin','INM_Tiburon'],
+  Bosque: ['INM_Barco','MAN_Vientos','INM_Tiburon','MAN_Ballena','INM_Barco','MAN_Vientos','INM_Tiburon','MAN_Tiburon','INM_Ballena','INM_Barco','MAN_Vientos','INM_Tiburon'],
+  Montana:['INM_Volcan','MAN_Delfin','DEF_Tiburon','INM_Tiburon','MAN_Vientos','INM_Barco'],
+};
+const _HEIGHT = { Playa:1, Bosque:2, Montana:3 };
+
+const TILES_INIT = (()=>{
+  const tiles=[]; const counters={Playa:0,Bosque:0,Montana:0}; let id=1;
+  for(let r=0;r<BOARD_ROWS;r++){
+    for(let c=0;c<BOARD_COLS;c++){
+      const t=BOARD_TERRAIN[r][c];
+      if(t==='Mar'||t==='Mainland') continue;
+      const pool=_ACTION_POOL[t]||['INM_Barco'];
+      const accion=pool[counters[t]%pool.length];
+      counters[t]++;
+      tiles.push({id:id++,tipo:t,altura:_HEIGHT[t]||1,accion,r,c});
+    }
+  }
+  return tiles;
+})();
 
 const ACTION_INFO = {
   INM_Barco:    {label:'Barco',       color:'#60a5fa',symbol:'⛵',desc:'Coloca un barco en el mar adyacente'},
@@ -117,9 +135,11 @@ const ACTION_INFO = {
 };
 
 const CREATURES_INIT = [
-  {id:'S1',tipo:'Serpiente',r:0,c:2,estado:'activo'},{id:'S2',tipo:'Serpiente',r:0,c:9,estado:'activo'},
-  {id:'S3',tipo:'Serpiente',r:4,c:0,estado:'activo'},{id:'S4',tipo:'Serpiente',r:7,c:2,estado:'activo'},
-  {id:'S5',tipo:'Serpiente',r:7,c:9,estado:'activo'},
+  // Center Sea Serpent (lair) — guards the empty center of the island.
+  {id:'S_CENTER',tipo:'Serpiente',r:ISLAND_CENTER.r,c:ISLAND_CENTER.c,estado:'activo'},
+  {id:'S1',tipo:'Serpiente',r:null,c:null,estado:'reserva'},
+  {id:'S2',tipo:'Serpiente',r:null,c:null,estado:'reserva'},
+  {id:'S3',tipo:'Serpiente',r:null,c:null,estado:'reserva'},
   {id:'T1',tipo:'Tiburon',r:null,c:null,estado:'reserva'},{id:'T2',tipo:'Tiburon',r:null,c:null,estado:'reserva'},
   {id:'T3',tipo:'Tiburon',r:null,c:null,estado:'reserva'},{id:'T4',tipo:'Tiburon',r:null,c:null,estado:'reserva'},
   {id:'T5',tipo:'Tiburon',r:null,c:null,estado:'reserva'},
@@ -148,17 +168,69 @@ const PHASE_INFO=[
 ];
 
 function generateHand(n=3){return[...HAND_TILE_TYPES].sort(()=>Math.random()-0.5).slice(0,n).map((t,i)=>({...t,uid:`${t.id}_${i}_${Date.now()}`}));}
-function isIslandCell(r,c){return r>=2&&r<=6&&c>=2&&c<=9;}
-function isSeaCell(r,c){return!isIslandCell(r,c);}
-function getAdjacentCells(r,c){return[[r-1,c],[r+1,c],[r,c-1],[r,c+1]].filter(([a,b])=>a>=0&&a<9&&b>=0&&b<12);}
+function isIslandCell(r,c){const t=BOARD_TERRAIN[r]?.[c];return t==='Playa'||t==='Bosque'||t==='Montana';}
+function isMainlandCell(r,c){return BOARD_TERRAIN[r]?.[c]==='Mainland';}
+function isSeaCell(r,c){return BOARD_TERRAIN[r]?.[c]==='Mar';}
+// Hex neighbors (odd-r offset).
+function getAdjacentCells(r,c){
+  const even=(r&1)===0;
+  const deltas=even?[[-1,-1],[-1,0],[0,-1],[0,1],[1,-1],[1,0]]:[[-1,0],[-1,1],[0,-1],[0,1],[1,0],[1,1]];
+  return deltas.map(([dr,dc])=>[r+dr,c+dc]).filter(([a,b])=>a>=0&&a<BOARD_ROWS&&b>=0&&b<BOARD_COLS);
+}
 function getEdgeTiles(tiles){
   const rm=new Set(tiles.filter(t=>t.removed||t.removing).map(t=>`${t.r},${t.c}`));
   return tiles.filter(t=>{if(t.removed||t.removing)return false;return getAdjacentCells(t.r,t.c).some(([a,b])=>isSeaCell(a,b)||rm.has(`${a},${b}`));});
 }
+// Place all 10 explorers per player on their assigned Mainland corner (state:'mainland').
 function createInitialExplorers(numPlayers){
-  const out=[],tpp=Math.floor(40/numPlayers);
-  for(let p=1;p<=numPlayers;p++){const si=(p-1)*tpp;for(let i=0;i<10;i++){const tile=TILES_INIT[(si+i)%40];out.push({id:(p-1)*10+i+1,player:p,value:EXPLORER_VALUES[i],r:tile.r,c:tile.c,state:'tierra'});}}
+  const out=[];
+  for(let p=1;p<=numPlayers;p++){
+    const[cr,cc]=MAINLAND_CORNERS[(p-1)%MAINLAND_CORNERS.length];
+    for(let i=0;i<10;i++){
+      out.push({id:(p-1)*10+i+1,player:p,value:EXPLORER_VALUES[i],r:cr,c:cc,state:'mainland'});
+    }
+  }
   return out;
+}
+
+// ── Mock Sheets bridge ──────────────────────────────────────────────────────
+const USE_MOCK_BACKEND = true;
+const SHEETS_ENDPOINT = 'REPLACE_WITH_YOUR_DEPLOYMENT_ID';
+const _MOCK = {
+  KEY:'island_mock_state', LATENCY_MS:120, _memory:null,
+  _delay(){return new Promise(r=>setTimeout(r,_MOCK.LATENCY_MS));},
+  async _load(){await _MOCK._delay();
+    if(_MOCK._memory) return _MOCK._memory;
+    try{const s=localStorage.getItem(_MOCK.KEY);if(s){_MOCK._memory=JSON.parse(s);return _MOCK._memory;}}catch(e){}
+    _MOCK._memory={__empty:true}; return _MOCK._memory;
+  },
+  async _save(obj){await _MOCK._delay();
+    _MOCK._memory={...(_MOCK._memory||{}),...obj,__empty:false};
+    try{localStorage.setItem(_MOCK.KEY,JSON.stringify(_MOCK._memory));}catch(e){}
+    return _MOCK._memory;
+  },
+};
+async function fetchBoardState(){
+  if(USE_MOCK_BACKEND) return _MOCK._load();
+  const res=await fetch(`${SHEETS_ENDPOINT}?action=state`);
+  return res.json();
+}
+async function pushTurnUpdate(update){
+  if(USE_MOCK_BACKEND) return _MOCK._save(update);
+  const res=await fetch(SHEETS_ENDPOINT,{method:'POST',headers:{'Content-Type':'text/plain'},body:JSON.stringify({action:'update',payload:update})});
+  return res.json();
+}
+// Returns a stop() function. Under mock, no-op.
+async function pollBoardState(intervalMs,onUpdate){
+  if(USE_MOCK_BACKEND) return ()=>{};
+  let alive=true;
+  (async function loop(){
+    while(alive){
+      try{const r=await fetchBoardState(); if(r&&!r.__empty) onUpdate(r);}catch(e){/* swallow */}
+      await new Promise(res=>setTimeout(res,intervalMs));
+    }
+  })();
+  return ()=>{alive=false;};
 }
 </script>
 
@@ -176,10 +248,11 @@ function hPts(cx,cy){ return Array.from({length:6},(_,i)=>{const a=Math.PI/3*i-M
 
 // Terrain fills: [lightFill, lightStroke, darkFill, darkStroke]
 const TC={
-  Mar:    ['rgba(255,255,255,0.07)','rgba(255,255,255,0.14)','rgba(0,0,0,0.15)','rgba(255,255,255,0.07)'],
-  Playa:  ['#e8c87a','#c4983a','#5a4012','#8a6020'],
-  Bosque: ['#4a8c3f','#2d6b28','#1c4818','#2d6b28'],
-  Montana:['#8a7ba0','#5e4d7a','#2c2040','#4a3462'],
+  Mar:     ['rgba(255,255,255,0.07)','rgba(255,255,255,0.14)','rgba(0,0,0,0.15)','rgba(255,255,255,0.07)'],
+  Playa:   ['#e8c87a','#c4983a','#5a4012','#8a6020'],
+  Bosque:  ['#4a8c3f','#2d6b28','#1c4818','#2d6b28'],
+  Montana: ['#8a7ba0','#5e4d7a','#2c2040','#4a3462'],
+  Mainland:['#d9c9a7','#9a7a45','#6b5a30','#a08550'],
 };
 function tf(t,dark,i){return(TC[t]||TC.Mar)[dark?i+2:i];}
 
@@ -435,15 +508,51 @@ function createState(n){
 }
 
 function App(){
-  const[gs,setGs]=useState(()=>{try{const s=JSON.parse(localStorage.getItem('island_v3'));return s||createState(4);}catch{return createState(4);}});
+  const[gs,setGs]=useState(()=>{try{const s=JSON.parse(localStorage.getItem('island_v4'));return s||createState(4);}catch{return createState(4);}});
   const[tweaks,setTweaks]=useState(()=>{try{return JSON.parse(localStorage.getItem('island_tweaks'))||{...TWEAK_DEFAULTS};}catch{return{...TWEAK_DEFAULTS};}});
   const[dark,setDark]=useState(()=>{try{return JSON.parse(localStorage.getItem('island_dark'))||false;}catch{return false;}});
   const[showTweaks,setShowTweaks]=useState(false);
 
-  useEffect(()=>{localStorage.setItem('island_v3',JSON.stringify(gs));},[gs]);
+  useEffect(()=>{localStorage.setItem('island_v4',JSON.stringify(gs));},[gs]);
   useEffect(()=>{localStorage.setItem('island_tweaks',JSON.stringify(tweaks));window.parent.postMessage({type:'__edit_mode_set_keys',edits:tweaks},'*');},[tweaks]);
   useEffect(()=>{localStorage.setItem('island_dark',JSON.stringify(dark));},[dark]);
   useEffect(()=>{const h=e=>{if(e.data?.type==='__activate_edit_mode')setShowTweaks(true);if(e.data?.type==='__deactivate_edit_mode')setShowTweaks(false);};window.addEventListener('message',h);window.parent.postMessage({type:'__edit_mode_available'},'*');return()=>window.removeEventListener('message',h);},[]);
+
+  // ── Auto-skip phase 1 when the active player's hand is empty ───────────────
+  useEffect(()=>{
+    if(gs.gameOver)return;
+    const h=gs.hands?.[gs.currentPlayer];
+    if(gs.phase===1 && (!h || h.length===0)){
+      const t=setTimeout(()=>{setGs(p=>({...p,log:[...p.log.slice(-59),{type:'info',text:`Mano vacía — fase 1 omitida.`}]}));handleNextPhase();},140);
+      return()=>clearTimeout(t);
+    }
+  },[gs.phase,gs.hands,gs.currentPlayer,gs.gameOver]);
+
+  // ── Strict 3-move cap auto-advance ────────────────────────────────────────
+  useEffect(()=>{
+    if(gs.phase===2 && gs.movePts<=0 && !gs.gameOver){
+      const t=setTimeout(()=>handleNextPhase(),220);
+      return()=>clearTimeout(t);
+    }
+  },[gs.phase,gs.movePts,gs.gameOver]);
+
+  // ── Google Sheets backend sync (mock-backed while USE_MOCK_BACKEND=true) ──
+  useEffect(()=>{
+    let stop;
+    (async()=>{
+      try{
+        const remote=await fetchBoardState();
+        if(remote && !remote.__empty) setGs(prev=>({...prev,...remote}));
+      }catch(e){console.warn('initial sheet load',e);}
+      stop=await pollBoardState(5000,(remote)=>setGs(prev=>({...prev,...remote})));
+    })();
+    return()=>{if(stop)stop();};
+  },[]);
+  useEffect(()=>{
+    if(!gs?.turn)return;
+    const t=setTimeout(()=>{pushTurnUpdate(gs).catch(console.warn);},250);
+    return()=>clearTimeout(t);
+  },[gs.turn,gs.phase,gs.currentPlayer]);
 
   // Theme
   const th=dark?{bg:'#0d1018',border:'#1e293b',text:'#f0f4f8',muted:'#64748b',card:'#111827',shadow:'none',accent:'#3b82f6'}
@@ -466,13 +575,16 @@ function App(){
         addLog(`Criatura movida a F${r+1}C${c+1}.`);
         return{...base,creatures:prev.creatures.map(cr=>cr.id===prev.selectedCreature?{...cr,r,c}:cr),selectedCreature:null};
       }
-      // Phase 2: move explorer
+      // Phase 2: move explorer — strict 3-move cap
       if(prev.phase===2){
         if(prev.selectedExplorer&&movableSet.has(key)){
+          if(prev.movePts<=0){addLog('Máximo 3 movimientos alcanzado.','warn');return prev;}
           const onLand=isIslandCell(r,c)&&prev.tiles.find(t=>t.r===r&&t.c===c&&!t.removed);
+          const onMainland=isMainlandCell(r,c);
           const newPts=prev.movePts-1;
-          addLog(`J${prev.currentPlayer} → F${r+1}C${c+1} (${onLand?'tierra':'agua'}). ${newPts} pts.`);
-          return{...base,explorers:prev.explorers.map(e=>e.id===prev.selectedExplorer?{...e,r,c,state:onLand?'tierra':'nadando'}:e),movePts:newPts,selectedExplorer:null};
+          const newState=onMainland?'salvado':(onLand?'tierra':'nadando');
+          addLog(`J${prev.currentPlayer} → F${r+1}C${c+1} (${newState}). ${newPts} pts.`);
+          return{...base,explorers:prev.explorers.map(e=>e.id===prev.selectedExplorer?{...e,r,c,state:newState}:e),movePts:newPts,selectedExplorer:null,phaseDone:newPts<=0};
         }
         const mine=prev.explorers.filter(e=>e.r===r&&e.c===c&&e.player===prev.currentPlayer&&e.state!=='salvado'&&e.state!=='eliminado');
         if(mine.length>0){addLog(`Explorador seleccionado en F${r+1}C${c+1}.`,'info');return{...base,selectedExplorer:mine[0].id};}
@@ -526,8 +638,28 @@ function App(){
     setTimeout(()=>{const roll=Math.floor(Math.random()*6);const r=DICE_MAP[roll];setGs(p=>({...p,diceRolling:false,diceResult:r}));addLog(`Dado: ${r.toUpperCase()} (${roll+1}) — mueve la criatura en el tablero.`,'warn')},700);
   },[addLog]);
 
+  // Immediate effect resolution — activating a token switches game state instantly
   const handlePlayCard=useCallback((card)=>{
-    setGs(p=>({...p,hands:{...p.hands,[p.currentPlayer]:(p.hands[p.currentPlayer]||[]).filter(c=>c.uid!==card.uid)},log:[...p.log.slice(-59),{type:'action',text:`J${p.currentPlayer} juega: ${card.label} — ${card.desc}`}]}));
+    setGs(p=>{
+      const hands={...p.hands,[p.currentPlayer]:(p.hands[p.currentPlayer]||[]).filter(c=>c.uid!==card.uid)};
+      const fx={};
+      switch(card.id){
+        case 'delfin':
+          fx.phase=2; fx.movePts=3; fx.pendingEffect='delfin_swim'; break;
+        case 'remo':
+          fx.phase=2; fx.movePts=(p.movePts||0)+2; break;
+        case 'serpiente':
+          fx.phase=4; fx.diceResult='Serpiente'; break;
+        case 'tiburon':
+          fx.phase=4; fx.diceResult='Tiburon'; break;
+        case 'ballena':
+          fx.phase=4; fx.diceResult='Ballena'; break;
+        case 'vientos':   fx.pendingEffect='move_boat_2'; break;
+        case 'remolino':  fx.pendingEffect='place_whirlpool'; break;
+        case 'defensa':   fx.pendingEffect='defense_shield'; break;
+      }
+      return {...p,...fx,hands,log:[...p.log.slice(-59),{type:'action',text:`J${p.currentPlayer} juega: ${card.label} — efecto resuelto`}]};
+    });
   },[]);
 
   const newGame=(np)=>{localStorage.removeItem('island_v3');setGs(createState(np||gs.numPlayers));};

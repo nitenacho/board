@@ -301,12 +301,28 @@ function btnStyle(bg, text, border) {
 function HUD({
   currentPlayer, numPlayers, turn, phase,
   scores, log, diceResult, diceRolling, movePts,
-  hand, onPlayCard,
+  hand, onPlayCard, onCardEffect,
   onNextPhase, onRollDice, onPassPhase,
   selectedInfo,
   tweaks, setTweaks, showTweaks,
 }) {
   const p = PLAYER_DATA[currentPlayer];
+
+  // ── Auto-skip phase 1 when the active player's hand is empty ──────────────
+  React.useEffect(() => {
+    if (phase === 1 && (!hand || hand.length === 0)) {
+      const t = setTimeout(() => onNextPhase?.(), 120);
+      return () => clearTimeout(t);
+    }
+  }, [phase, hand, onNextPhase]);
+
+  // ── Strict 3-move cap: auto-advance once points are spent ─────────────────
+  React.useEffect(() => {
+    if (phase === 2 && movePts <= 0) {
+      const t = setTimeout(() => onNextPhase?.(), 200);
+      return () => clearTimeout(t);
+    }
+  }, [phase, movePts, onNextPhase]);
 
   return (
     <aside style={{
@@ -362,9 +378,25 @@ function HUD({
 
         {/* Phase-specific widgets */}
         {phase === 1 && hand && (
-          <HandCards hand={hand} onPlay={onPlayCard} phase={phase} />
+          <HandCards
+            hand={hand}
+            phase={phase}
+            onPlay={(card) => {
+              onPlayCard?.(card);       // remove card from hand (parent)
+              onCardEffect?.(card);     // resolve effect + switch phase (parent)
+            }}
+          />
         )}
-        {phase === 2 && <MovePtsBar movePts={movePts} />}
+        {phase === 2 && (
+          <div>
+            <MovePtsBar movePts={movePts} />
+            {movePts <= 0 && (
+              <div style={{ fontSize:10, color:'#6b7280', textAlign:'center', marginTop:6 }}>
+                Máximo 3 movimientos alcanzado — fase completada.
+              </div>
+            )}
+          </div>
+        )}
         {phase === 4 && <DiceDisplay result={diceResult} rolling={diceRolling} onRoll={onRollDice} />}
 
         {/* Selected cell */}
