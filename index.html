@@ -171,6 +171,15 @@ function generateHand(n=3){return[...HAND_TILE_TYPES].sort(()=>Math.random()-0.5
 function isIslandCell(r,c){const t=BOARD_TERRAIN[r]?.[c];return t==='Playa'||t==='Bosque'||t==='Montana';}
 function isMainlandCell(r,c){return BOARD_TERRAIN[r]?.[c]==='Mainland';}
 function isSeaCell(r,c){return BOARD_TERRAIN[r]?.[c]==='Mar';}
+// Treat sunken tiles as sea dynamically.
+function isEffectiveSea(r,c,tiles){
+  if(isSeaCell(r,c)) return true;
+  if(isIslandCell(r,c)){
+    const t=tiles?.find(x=>x.r===r&&x.c===c);
+    return !!(t && (t.removed||t.removing));
+  }
+  return false;
+}
 // Hex neighbors (odd-r offset).
 function getAdjacentCells(r,c){
   const even=(r&1)===0;
@@ -181,21 +190,37 @@ function getEdgeTiles(tiles){
   const rm=new Set(tiles.filter(t=>t.removed||t.removing).map(t=>`${t.r},${t.c}`));
   return tiles.filter(t=>{if(t.removed||t.removing)return false;return getAdjacentCells(t.r,t.c).some(([a,b])=>isSeaCell(a,b)||rm.has(`${a},${b}`));});
 }
-// Place all 10 explorers per player on their assigned Mainland corner (state:'mainland').
+// Per official rules: explorers start scattered on island tiles. They must escape
+// to the Mainland corners. Hidden value (1-6) is revealed only on arrival.
 function createInitialExplorers(numPlayers){
   const out=[];
+  const cells=[];
+  for(let r=0;r<BOARD_ROWS;r++)for(let c=0;c<BOARD_COLS;c++)if(isIslandCell(r,c)) cells.push([r,c]);
+  // Shuffle island cells so explorers scatter randomly each game.
+  const shuffled=[...cells].sort(()=>Math.random()-0.5);
+  let idx=0;
   for(let p=1;p<=numPlayers;p++){
-    const[cr,cc]=MAINLAND_CORNERS[(p-1)%MAINLAND_CORNERS.length];
+    const vals=[...EXPLORER_VALUES].sort(()=>Math.random()-0.5);
     for(let i=0;i<10;i++){
-      out.push({id:(p-1)*10+i+1,player:p,value:EXPLORER_VALUES[i],r:cr,c:cc,state:'mainland'});
+      const[r,c]=shuffled[idx%shuffled.length]; idx++;
+      out.push({
+        id:(p-1)*10+i+1, player:p, value:vals[i],
+        r, c, state:'tierra',
+        hasMovedThisTurn:false,
+      });
     }
   }
   return out;
 }
 
+// Hex "sea neighbours" helper — used by Remolino to clear the 6 adjacent sea cells.
+function getSeaNeighbours(r,c){
+  return getAdjacentCells(r,c).filter(([a,b])=>isSeaCell(a,b));
+}
+
 // ── Mock Sheets bridge ──────────────────────────────────────────────────────
-const USE_MOCK_BACKEND = true;
-const SHEETS_ENDPOINT = 'REPLACE_WITH_YOUR_DEPLOYMENT_ID';
+const USE_MOCK_BACKEND = false;
+const SHEETS_ENDPOINT = 'https://script.google.com/macros/s/AKfycbyQZGaTFfll7TwkbWq3AS_Err1FdxBG8TvIHtLbimSLxtGzbgOp4Gc5bgGGMIkCzdVyvQ/exec';
 const _MOCK = {
   KEY:'island_mock_state', LATENCY_MS:120, _memory:null,
   _delay(){return new Promise(r=>setTimeout(r,_MOCK.LATENCY_MS));},
@@ -217,8 +242,16 @@ async function fetchBoardState(){
 }
 async function pushTurnUpdate(update){
   if(USE_MOCK_BACKEND) return _MOCK._save(update);
-  const res=await fetch(SHEETS_ENDPOINT,{method:'POST',headers:{'Content-Type':'text/plain'},body:JSON.stringify({action:'update',payload:update})});
-  return res.json();
+  try{
+    const res=await fetch(SHEETS_ENDPOINT,{method:'POST',headers:{'Content-Type':'text/plain'},body:JSON.stringify({action:'saveState',state:update})});
+    return await res.json();
+  }catch(e){ console.warn('Sheets push failed',e); return {ok:false,error:String(e)}; }
+}
+async function logSheetEvent(entry){
+  if(USE_MOCK_BACKEND) return;
+  try{
+    await fetch(SHEETS_ENDPOINT,{method:'POST',headers:{'Content-Type':'text/plain'},body:JSON.stringify({action:'log',...entry})});
+  }catch(e){ /* silent */ }
 }
 // Returns a stop() function. Under mock, no-op.
 async function pollBoardState(intervalMs,onUpdate){
@@ -290,8 +323,10 @@ function HexCell({r,c,terrain,tile,explorers,creatures,boats,selected,movable,re
   const pts=hPts(cx,cy);
   const isIsland=tile&&!tile.removed&&!tile.removing;
   const isRemoving=tile?.removing;
+  // Once a tile is removed, the cell becomes sea — render as Mar regardless of original terrain.
+  const effTerrain=(tile?.removed && !isRemoving) ? 'Mar' : terrain;
 
-  let fill=tf(terrain,dark,0), stroke=tf(terrain,dark,1), sw=isIsland?1.5:0.8;
+  let fill=tf(effTerrain,dark,0), stroke=tf(effTerrain,dark,1), sw=isIsland?1.5:0.8;
   if(selected){stroke='#fbbf24';sw=2.5;}
   else if(removable){stroke='#f97316';sw=2.5;}
   else if(movable){stroke='#22d3ee';sw=2;}
@@ -494,26 +529,41 @@ const TWEAK_DEFAULTS=/*EDITMODE-BEGIN*/{
 }/*EDITMODE-END*/;
 
 function createState(n){
-  const hands={};for(let p=1;p<=n;p++)hands[p]=generateHand(3);
+  // Hands start empty — players earn tokens by sinking MAN_/DEF_ tiles.
+  const hands={};for(let p=1;p<=n;p++)hands[p]=[];
   return{numPlayers:n,currentPlayer:1,turn:1,phase:1,
     tiles:TILES_INIT.map(t=>({...t,removed:false,removing:false})),
     explorers:createInitialExplorers(n),
     creatures:CREATURES_INIT.map(c=>({...c})),
     boats:[],hands,
     scores:Object.fromEntries(Array.from({length:n},(_,i)=>[i+1,0])),
-    log:[{type:'info',text:'¡La isla emerge del mar! Partida iniciada.'},{type:'action',text:'Turno 01 — Jugador 1 comienza.'}],
+    log:[
+      {type:'info',text:'¡La isla emerge del mar! Partida iniciada.'},
+      {type:'info',text:'Reglamento: 3 pts/turno · nadador sólo 1 casilla · hundir Playa→Bosque→Montaña.'},
+      {type:'action',text:'Turno 01 — Jugador 1 comienza.'},
+    ],
     movePts:3,diceResult:null,diceRolling:false,
     selectedCell:null,selectedExplorer:null,selectedCreature:null,
-    phaseDone:false,gameOver:false};
+    phaseDone:false,gameOver:false,
+    pendingEffect:null,
+  };
 }
 
 function App(){
-  const[gs,setGs]=useState(()=>{try{const s=JSON.parse(localStorage.getItem('island_v4'));return s||createState(4);}catch{return createState(4);}});
+  const[gsLive,setGs]=useState(()=>{try{const s=JSON.parse(localStorage.getItem('island_v4'));return s||createState(4);}catch{return createState(4);}});
   const[tweaks,setTweaks]=useState(()=>{try{return JSON.parse(localStorage.getItem('island_tweaks'))||{...TWEAK_DEFAULTS};}catch{return{...TWEAK_DEFAULTS};}});
   const[dark,setDark]=useState(()=>{try{return JSON.parse(localStorage.getItem('island_dark'))||false;}catch{return false;}});
   const[showTweaks,setShowTweaks]=useState(false);
+  // ── Simulator + history ──
+  const[simulating,setSimulating]=useState(false);
+  const[simSpeed,setSimSpeed]=useState(650);   // ms per auto-action
+  const[history,setHistory]=useState([]);      // ring buffer of snapshots
+  const[viewIdx,setViewIdx]=useState(-1);      // -1 = live
+  // When viewing history, the render uses the snapshot. Handlers still mutate gsLive.
+  const gs = (viewIdx>=0 && history[viewIdx]?.snapshot) ? history[viewIdx].snapshot : gsLive;
+  const scrubbing = viewIdx>=0;
 
-  useEffect(()=>{localStorage.setItem('island_v4',JSON.stringify(gs));},[gs]);
+  useEffect(()=>{localStorage.setItem('island_v4',JSON.stringify(gsLive));},[gsLive]);
   useEffect(()=>{localStorage.setItem('island_tweaks',JSON.stringify(tweaks));window.parent.postMessage({type:'__edit_mode_set_keys',edits:tweaks},'*');},[tweaks]);
   useEffect(()=>{localStorage.setItem('island_dark',JSON.stringify(dark));},[dark]);
   useEffect(()=>{const h=e=>{if(e.data?.type==='__activate_edit_mode')setShowTweaks(true);if(e.data?.type==='__deactivate_edit_mode')setShowTweaks(false);};window.addEventListener('message',h);window.parent.postMessage({type:'__edit_mode_available'},'*');return()=>window.removeEventListener('message',h);},[]);
@@ -554,6 +604,217 @@ function App(){
     return()=>clearTimeout(t);
   },[gs.turn,gs.phase,gs.currentPlayer]);
 
+  // ── Snapshot history (on phase/turn/player change) ────────────────────────
+  useEffect(()=>{
+    if(viewIdx>=0) return; // don't mutate history while scrubbing
+    const snap=JSON.parse(JSON.stringify(gsLive));
+    setHistory(h=>[...h.slice(-99),{ts:Date.now(),snapshot:snap}]);
+    // ── Sheets sync (no-op if USE_MOCK_BACKEND=true) ────────────────────
+    try{
+      logSheetEvent({player:gsLive.currentPlayer,turn:gsLive.turn,phase:gsLive.phase,event:'phase_tick',payload:{scores:gsLive.scores,gameOver:gsLive.gameOver}});
+      pushTurnUpdate({turn:gsLive.turn,phase:gsLive.phase,currentPlayer:gsLive.currentPlayer,scores:gsLive.scores,gameOver:gsLive.gameOver,ts:Date.now()});
+    }catch(e){/* silent */}
+  },[gsLive.turn,gsLive.phase,gsLive.currentPlayer]);
+
+  // ── Auto-play AI tick ─────────────────────────────────────────────────────
+  useEffect(()=>{
+    if(!simulating || gsLive.gameOver || viewIdx>=0) return;
+    const id=setTimeout(()=>{ aiStep(); }, simSpeed);
+    return()=>clearTimeout(id);
+  },[simulating,simSpeed,gsLive,viewIdx]);
+
+  // Single-step AI: picks the next reasonable action based on phase.
+  const aiStep=useCallback(()=>{
+    setGs(prev=>{
+      if(prev.gameOver) return prev;
+      const clone=JSON.parse(JSON.stringify(prev));
+      // Phase 1: play a random hand card occasionally; else advance.
+      if(clone.phase===1){
+        const h=clone.hands[clone.currentPlayer]||[];
+        if(h.length>0 && Math.random()<0.35){
+          // Inline the simple "to hand card" effects rather than replicating handlePlayCard.
+          const card=h[Math.floor(Math.random()*h.length)];
+          clone.hands[clone.currentPlayer]=h.filter(c=>c.uid!==card.uid);
+          clone.log=[...clone.log.slice(-59),{type:'action',text:`[IA] J${clone.currentPlayer} descarta ${card.label}.`}];
+          return clone;
+        }
+        clone.phase=2; clone.movePts=3;
+        clone.log=[...clone.log.slice(-59),{type:'info',text:`[IA] Fase 2 — movimiento.`}];
+        return clone;
+      }
+      // Phase 2: SMART movement — score safezones, use boats efficiently.
+      if(clone.phase===2){
+        if(clone.movePts<=0){ return _advancePhase(clone); }
+        const pid=clone.currentPlayer;
+        const mine=clone.explorers.filter(e=>e.player===pid&&e.state!=='salvado'&&e.state!=='eliminado');
+        const dM=(r,c)=>Math.min(...MAINLAND_CORNERS.map(([mr,mc])=>hexDistance(r,c,mr,mc)));
+        const onBoatId=eid=>clone.boats.find(b=>(b.explorers||[]).includes(eid));
+        const canMove=e=>!(e.state==='nadando'&&e.hasMovedThisTurn);
+
+        // ── P1: walk an explorer straight onto mainland (score now!) ──
+        for(const e of mine){
+          if(!canMove(e)) continue;
+          if(onBoatId(e.id)) continue; // handled in P2
+          const ml=getAdjacentCells(e.r,e.c).find(([r,c])=>isMainlandCell(r,c));
+          if(ml){
+            const[r,c]=ml;
+            clone.scores={...clone.scores,[pid]:(clone.scores[pid]||0)+(e.value||0)};
+            clone.explorers=clone.explorers.map(x=>x.id===e.id?{...x,r,c,state:'salvado',hasMovedThisTurn:true}:x);
+            clone.movePts--;
+            clone.log=[...clone.log.slice(-59),{type:'action',text:`[IA] ¡J${pid} salvado v${e.value}! +${e.value} pts.`}];
+            return clone;
+          }
+        }
+
+        // ── P2: disembark from boat adjacent to mainland ──
+        const myBoats=clone.boats.filter(b=>(b.explorers||[]).some(id=>mine.some(m=>m.id===id)));
+        for(const b of myBoats){
+          const ml=getAdjacentCells(b.r,b.c).find(([r,c])=>isMainlandCell(r,c));
+          if(!ml) continue;
+          const occIds=(b.explorers||[]).filter(id=>mine.some(m=>m.id===id));
+          if(occIds.length===0) continue;
+          const[r,c]=ml;
+          const exp=clone.explorers.find(x=>x.id===occIds[0]);
+          clone.scores={...clone.scores,[pid]:(clone.scores[pid]||0)+(exp.value||0)};
+          clone.boats=clone.boats.map(x=>x.id===b.id?{...x,explorers:(x.explorers||[]).filter(id=>id!==exp.id)}:x);
+          clone.explorers=clone.explorers.map(x=>x.id===exp.id?{...x,r,c,state:'salvado',hasMovedThisTurn:true}:x);
+          clone.movePts--;
+          clone.log=[...clone.log.slice(-59),{type:'action',text:`[IA] Desembarca y salva v${exp.value}. +${exp.value} pts.`}];
+          return clone;
+        }
+
+        // ── P3: move a boat carrying my explorers closer to mainland (3-for-1!) ──
+        for(const b of myBoats){
+          const seaN=getAdjacentCells(b.r,b.c).filter(([r,c])=>isEffectiveSea(r,c,clone.tiles));
+          if(seaN.length===0) continue;
+          const cur=dM(b.r,b.c);
+          seaN.sort((a,z)=>dM(a[0],a[1])-dM(z[0],z[1]));
+          const[tr,tc]=seaN[0];
+          if(dM(tr,tc)<cur){
+            const occIds=new Set(b.explorers||[]);
+            clone.boats=clone.boats.map(x=>x.id===b.id?{...x,r:tr,c:tc}:x);
+            clone.explorers=clone.explorers.map(e=>occIds.has(e.id)?{...e,r:tr,c:tc}:e);
+            clone.movePts--;
+            clone.log=[...clone.log.slice(-59),{type:'action',text:`[IA] Barco (${occIds.size} exp.) → F${tr+1}C${tc+1}`}];
+            return clone;
+          }
+        }
+
+        // ── P4: board an adjacent boat if closer to mainland via water ──
+        for(const e of mine){
+          if(!canMove(e)) continue;
+          if(onBoatId(e.id)) continue;
+          const nbrs=getAdjacentCells(e.r,e.c);
+          const boatN=nbrs.find(([r,c])=>clone.boats.some(b=>b.r===r&&b.c===c&&(b.explorers||[]).length<(b.capacity||3)));
+          if(boatN){
+            const[r,c]=boatN;
+            const boat=clone.boats.find(b=>b.r===r&&b.c===c);
+            clone.boats=clone.boats.map(x=>x.id===boat.id?{...x,explorers:[...(x.explorers||[]),e.id]}:x);
+            clone.explorers=clone.explorers.map(x=>x.id===e.id?{...x,r,c,state:'nadando',hasMovedThisTurn:true}:x);
+            clone.movePts--;
+            clone.log=[...clone.log.slice(-59),{type:'info',text:`[IA] J${pid}(v${e.value}) aborda barco.`}];
+            return clone;
+          }
+        }
+
+        // ── P5: walk highest-value explorer toward nearest safezone ──
+        const walkable=mine.filter(canMove).filter(e=>!onBoatId(e.id));
+        if(walkable.length===0){ clone.movePts=0; return clone; }
+        walkable.sort((a,b)=>(b.value||0)-(a.value||0)||dM(a.r,a.c)-dM(b.r,b.c));
+        const e=walkable[0];
+        const nbrs=getAdjacentCells(e.r,e.c);
+        if(nbrs.length===0){ return _advancePhase(clone); }
+        const scored=nbrs.map(([r,c])=>({r,c,d:dM(r,c)})).sort((a,z)=>a.d-z.d);
+        const pick=scored[0];
+        const onLand=isIslandCell(pick.r,pick.c)&&clone.tiles.find(t=>t.r===pick.r&&t.c===pick.c&&!t.removed);
+        const onMainland=isMainlandCell(pick.r,pick.c);
+        const newState=onMainland?'salvado':(onLand?'tierra':'nadando');
+        if(onMainland){
+          clone.scores={...clone.scores,[pid]:(clone.scores[pid]||0)+(e.value||0)};
+          clone.log=[...clone.log.slice(-59),{type:'action',text:`[IA] ¡J${pid} salvado v${e.value}! +${e.value} pts.`}];
+        }
+        clone.explorers=clone.explorers.map(x=>x.id===e.id?{...x,r:pick.r,c:pick.c,state:newState,hasMovedThisTurn:true}:x);
+        clone.movePts--;
+        clone.log=[...clone.log.slice(-59),{type:'info',text:`[IA] J${pid}(v${e.value}) → F${pick.r+1}C${pick.c+1}`}];
+        return clone;
+      }
+      // Phase 3: sink lowest-altitude edge tile.
+      if(clone.phase===3){
+        const edge=getEdgeTiles(clone.tiles);
+        if(edge.length===0){ clone.phase=4; return clone; }
+        const minH=Math.min(...edge.map(t=>t.altura));
+        const tile=edge.filter(t=>t.altura===minH)[0];
+        clone.tiles=clone.tiles.map(t=>t.id===tile.id?{...t,removed:true}:t);
+        // Drown anyone standing on it.
+        clone.explorers=clone.explorers.map(e=>(e.r===tile.r&&e.c===tile.c&&e.state==='tierra')?{...e,state:'nadando'}:e);
+        const ac=tile.accion;
+        if(ac==='INM_Volcan'){ clone.gameOver=true; clone.log=[...clone.log.slice(-59),{type:'error',text:'[IA] ¡VOLCÁN! Fin.'}]; return clone; }
+        if(ac==='INM_Barco'){ const adj=getAdjacentCells(tile.r,tile.c).find(([ar,ac])=>isEffectiveSea(ar,ac,clone.tiles)); if(adj) clone.boats=[...clone.boats,{id:`bt_${Date.now()}_${Math.random().toString(36).slice(2,5)}`,r:adj[0],c:adj[1],capacity:3,explorers:[]}];}
+        if(ac==='INM_Tiburon'||ac==='INM_Ballena'){ const tipo=ac==='INM_Tiburon'?'Tiburon':'Ballena'; const rv=clone.creatures.find(c=>c.tipo===tipo&&c.estado==='reserva'); const adj=getAdjacentCells(tile.r,tile.c).find(([ar,ac])=>isEffectiveSea(ar,ac,clone.tiles)); if(rv&&adj) clone.creatures=clone.creatures.map(c=>c.id===rv.id?{...c,r:adj[0],c:adj[1],estado:'activo'}:c);}
+        if(ac==='INM_Remolino'){
+          const kill=new Set([`${tile.r},${tile.c}`,...getSeaNeighbours(tile.r,tile.c).map(([a,b])=>`${a},${b}`)]);
+          clone.explorers=clone.explorers.map(e=>kill.has(`${e.r},${e.c}`)&&(e.state==='nadando'||e.state==='tierra')?{...e,state:'eliminado'}:e);
+          clone.boats=clone.boats.filter(b=>!kill.has(`${b.r},${b.c}`));
+          clone.creatures=clone.creatures.map(c=>kill.has(`${c.r},${c.c}`)&&c.estado==='activo'?{...c,r:null,c:null,estado:'reserva'}:c);
+        }
+        // Red tiles go to player's hand.
+        const handMap={MAN_Vientos:'vientos',MAN_Delfin:'delfin',MAN_Serpiente:'serpiente',MAN_Ballena:'ballena',MAN_Tiburon:'tiburon',DEF_Tiburon:'defensa',DEF_Ballena:'defensa'};
+        if(handMap[ac]){
+          const base=HAND_TILE_TYPES.find(t=>t.id===handMap[ac]);
+          if(base){ const card={...base,uid:`${base.id}_${Date.now()}_${Math.random().toString(36).slice(2,5)}`}; clone.hands={...clone.hands,[clone.currentPlayer]:[...(clone.hands[clone.currentPlayer]||[]),card]}; }
+        }
+        clone.log=[...clone.log.slice(-59),{type:'warn',text:`[IA] Hunde ${tile.tipo} h${tile.altura} (${ACTION_INFO[ac]?.label||ac}).`}];
+        clone.phase=4; clone.phaseDone=false;
+        return clone;
+      }
+      // Phase 4: roll dice + move matching creature into adjacent sea.
+      if(clone.phase===4){
+        if(!clone.diceResult){
+          clone.diceResult=DICE_MAP[Math.floor(Math.random()*6)];
+          clone.log=[...clone.log.slice(-59),{type:'warn',text:`[IA] Dado: ${clone.diceResult}.`}];
+          return clone;
+        }
+        const active=clone.creatures.filter(c=>c.tipo===clone.diceResult&&c.estado==='activo');
+        if(active.length===0){ return _advanceTurn(clone); }
+        const cr=active[Math.floor(Math.random()*active.length)];
+        const options=getAdjacentCells(cr.r,cr.c).filter(([r,c])=>isEffectiveSea(r,c,clone.tiles));
+        if(options.length>0){
+          const[tr,tc]=options[Math.floor(Math.random()*options.length)];
+          // Resolve collisions
+          const boatHere=clone.boats.find(b=>b.r===tr&&b.c===tc);
+          const swimmersHere=clone.explorers.filter(e=>e.r===tr&&e.c===tc&&e.state==='nadando');
+          if(cr.tipo==='Serpiente'&&boatHere){
+            const occ=new Set(boatHere.explorers||[]);
+            clone.explorers=clone.explorers.map(e=>occ.has(e.id)?{...e,state:'eliminado'}:e);
+            clone.boats=clone.boats.filter(b=>b.id!==boatHere.id);
+          } else if(cr.tipo==='Ballena'&&boatHere){
+            const occ=new Set(boatHere.explorers||[]);
+            clone.explorers=clone.explorers.map(e=>occ.has(e.id)?{...e,state:'nadando',r:tr,c:tc}:e);
+            clone.boats=clone.boats.filter(b=>b.id!==boatHere.id);
+          } else if(cr.tipo==='Tiburon'&&swimmersHere.length>0){
+            const ids=new Set(swimmersHere.map(e=>e.id));
+            clone.explorers=clone.explorers.map(e=>ids.has(e.id)?{...e,state:'eliminado'}:e);
+          }
+          clone.creatures=clone.creatures.map(c=>c.id===cr.id?{...c,r:tr,c:tc}:c);
+          clone.log=[...clone.log.slice(-59),{type:'info',text:`[IA] ${cr.tipo} → F${tr+1}C${tc+1}`}];
+        }
+        return _advanceTurn(clone);
+      }
+      return clone;
+    });
+  },[]);
+
+  const _advancePhase=(clone)=>{ clone.phase=Math.min(4,clone.phase+1); clone.phaseDone=false; clone.selectedExplorer=null; if(clone.phase===2) clone.movePts=3; return clone; };
+  const _advanceTurn=(clone)=>{
+    const np=(clone.currentPlayer%clone.numPlayers)+1;
+    clone.currentPlayer=np; clone.turn++; clone.phase=1; clone.movePts=3;
+    clone.diceResult=null; clone.diceRolling=false; clone.phaseDone=false;
+    clone.selectedExplorer=null; clone.selectedCreature=null; clone.selectedCell=null;
+    clone.explorers=clone.explorers.map(e=>({...e,hasMovedThisTurn:false}));
+    clone.log=[...clone.log.slice(-59),{type:'action',text:`── Turno ${clone.turn} — J${np} ──`}];
+    return clone;
+  };
+
   // Theme
   const th=dark?{bg:'#0d1018',border:'#1e293b',text:'#f0f4f8',muted:'#64748b',card:'#111827',shadow:'none',accent:'#3b82f6'}
                 :{bg:'#faf9f6',border:'#e8e0d4',text:'#111827',muted:'#9ca3af',card:'#f5f3ef',shadow:'0 1px 3px rgba(0,0,0,0.06)',accent:'#2563eb'};
@@ -562,7 +823,18 @@ function App(){
 
   const removableSet=useMemo(()=>{const s=new Set();if(gs.phase!==3)return s;getEdgeTiles(gs.tiles).forEach(t=>s.add(`${t.r},${t.c}`));return s;},[gs.phase,gs.tiles]);
 
-  const movableSet=useMemo(()=>{const s=new Set();if(gs.phase===2&&gs.selectedExplorer){const e=gs.explorers.find(e=>e.id===gs.selectedExplorer);if(e)getAdjacentCells(e.r,e.c).forEach(([r,c])=>s.add(`${r},${c}`));}if(gs.phase===4&&gs.selectedCreature&&gs.diceResult){const cr=gs.creatures.find(c=>c.id===gs.selectedCreature);if(cr&&cr.r!==null)getAdjacentCells(cr.r,cr.c).filter(([r,c])=>isSeaCell(r,c)).forEach(([r,c])=>s.add(`${r},${c}`));}return s;},[gs.phase,gs.selectedExplorer,gs.selectedCreature,gs.diceResult,gs.explorers,gs.creatures]);
+  const movableSet=useMemo(()=>{
+    const s=new Set();
+    if(gs.phase===2&&gs.selectedExplorer){
+      const e=gs.explorers.find(e=>e.id===gs.selectedExplorer);
+      if(e) getAdjacentCells(e.r,e.c).forEach(([r,c])=>s.add(`${r},${c}`));
+    }
+    if(gs.phase===4&&gs.selectedCreature&&gs.diceResult){
+      const cr=gs.creatures.find(c=>c.id===gs.selectedCreature);
+      if(cr&&cr.r!==null) getAdjacentCells(cr.r,cr.c).filter(([r,c])=>isEffectiveSea(r,c,gs.tiles)).forEach(([r,c])=>s.add(`${r},${c}`));
+    }
+    return s;
+  },[gs.phase,gs.selectedExplorer,gs.selectedCreature,gs.diceResult,gs.explorers,gs.creatures,gs.tiles]);
 
   const selectedInfo=useMemo(()=>{if(!gs.selectedCell)return null;const[r,c]=gs.selectedCell.split(',').map(Number);return{coord:`F${r+1} · C${c+1}`,tile:gs.tiles.find(t=>t.r===r&&t.c===c&&!t.removed),explorers:gs.explorers.filter(e=>e.r===r&&e.c===c&&e.state!=='salvado'&&e.state!=='eliminado'),creatures:gs.creatures.filter(cr=>cr.r===r&&cr.c===c&&cr.estado==='activo'),boats:gs.boats.filter(b=>b.r===r&&b.c===c)};},[gs.selectedCell,gs.tiles,gs.explorers,gs.creatures,gs.boats]);
 
@@ -570,41 +842,206 @@ function App(){
     const key=`${r},${c}`;
     setGs(prev=>{
       const base={...prev,selectedCell:prev.selectedCell===key?null:key};
-      // Phase 4: move creature
+      // Phase 4: move creature — resolve collisions on arrival
       if(prev.phase===4&&prev.selectedCreature&&prev.diceResult&&movableSet.has(key)){
-        addLog(`Criatura movida a F${r+1}C${c+1}.`);
-        return{...base,creatures:prev.creatures.map(cr=>cr.id===prev.selectedCreature?{...cr,r,c}:cr),selectedCreature:null};
+        const mover=prev.creatures.find(cr=>cr.id===prev.selectedCreature);
+        if(!mover)return base;
+        let newExplorers=[...prev.explorers], newBoats=[...prev.boats];
+        const boatHere=newBoats.find(b=>b.r===r&&b.c===c);
+        const swimmersHere=newExplorers.filter(e=>e.r===r&&e.c===c&&e.state==='nadando');
+
+        if(mover.tipo==='Serpiente' && boatHere){
+          // Kills boat + all occupants.
+          const occ=new Set(boatHere.explorers||[]);
+          newExplorers=newExplorers.map(e=>occ.has(e.id)?{...e,state:'eliminado'}:e);
+          newBoats=newBoats.filter(b=>b.id!==boatHere.id);
+          addLog(`¡Serpiente destruye barco y tripulación! (${occ.size})`,'error');
+        }
+        else if(mover.tipo==='Ballena' && boatHere){
+          // Ballena: destroys boat, occupants fall to water.
+          const occ=new Set(boatHere.explorers||[]);
+          newExplorers=newExplorers.map(e=>occ.has(e.id)?{...e,state:'nadando',r,c}:e);
+          newBoats=newBoats.filter(b=>b.id!==boatHere.id);
+          addLog(`Ballena hunde barco; ${occ.size} tripulantes ahora nadan.`,'warn');
+        }
+        else if(mover.tipo==='Tiburon' && swimmersHere.length>0){
+          const ids=new Set(swimmersHere.map(e=>e.id));
+          newExplorers=newExplorers.map(e=>ids.has(e.id)?{...e,state:'eliminado'}:e);
+          addLog(`Tiburón elimina ${ids.size} nadador(es).`,'error');
+        }
+
+        addLog(`${mover.tipo} movida a F${r+1}C${c+1}.`);
+        return{
+          ...base,
+          creatures:prev.creatures.map(cr=>cr.id===prev.selectedCreature?{...cr,r,c}:cr),
+          explorers:newExplorers, boats:newBoats,
+          selectedCreature:null,
+        };
       }
-      // Phase 2: move explorer — strict 3-move cap
+      // Phase 2: move explorer — 3 pts total, swimmer capped at 1 per turn, score on mainland.
+      // Supports boat boarding (explorer → adjacent boat) and boat moving (explorer on boat → adjacent sea moves whole boat).
       if(prev.phase===2){
         if(prev.selectedExplorer&&movableSet.has(key)){
           if(prev.movePts<=0){addLog('Máximo 3 movimientos alcanzado.','warn');return prev;}
+          const exp=prev.explorers.find(x=>x.id===prev.selectedExplorer);
+          if(!exp)return prev;
+          if(exp.state==='nadando' && exp.hasMovedThisTurn){
+            addLog('Un nadador solo puede moverse 1 casilla por turno.','warn');
+            return prev;
+          }
+          const expOnBoat=prev.boats.find(b=>(b.explorers||[]).includes(exp.id));
+          const targetBoat=prev.boats.find(b=>b.r===r&&b.c===c);
+          const targetSea=isEffectiveSea(r,c,prev.tiles);
           const onLand=isIslandCell(r,c)&&prev.tiles.find(t=>t.r===r&&t.c===c&&!t.removed);
           const onMainland=isMainlandCell(r,c);
           const newPts=prev.movePts-1;
+
+          // ── CASE A: explorer is on a boat → move the WHOLE boat (carries all passengers) ──
+          if(expOnBoat){
+            if(targetSea && !targetBoat){
+              // Boat moves to adjacent sea, carrying all passengers (1 movement point = 3 explorers moved)
+              const occIds=new Set(expOnBoat.explorers||[]);
+              addLog(`Barco (${occIds.size} exp.) → F${r+1}C${c+1}. ${newPts} pts restantes.`,'action');
+              return{
+                ...base,
+                boats:prev.boats.map(b=>b.id===expOnBoat.id?{...b,r,c}:b),
+                explorers:prev.explorers.map(x=>occIds.has(x.id)?{...x,r,c,hasMovedThisTurn:true}:x),
+                movePts:newPts,
+                selectedExplorer:null,
+                phaseDone:newPts<=0,
+              };
+            }
+            if(onMainland){
+              // Disembark onto mainland → salvado + scores
+              const newScores={...prev.scores,[prev.currentPlayer]:(prev.scores[prev.currentPlayer]||0)+(exp.value||0)};
+              addLog(`¡Desembarca y salva! J${prev.currentPlayer} +${exp.value} pts (valor ${exp.value}).`,'action');
+              return{
+                ...base,
+                boats:prev.boats.map(b=>b.id===expOnBoat.id?{...b,explorers:(b.explorers||[]).filter(id=>id!==exp.id)}:b),
+                explorers:prev.explorers.map(x=>x.id===exp.id?{...x,r,c,state:'salvado',hasMovedThisTurn:true}:x),
+                movePts:newPts,
+                selectedExplorer:null,
+                phaseDone:newPts<=0,
+                scores:newScores,
+              };
+            }
+            if(onLand){
+              // Disembark to a beach/land adjacent
+              addLog(`Desembarca en F${r+1}C${c+1}. ${newPts} pts.`);
+              return{
+                ...base,
+                boats:prev.boats.map(b=>b.id===expOnBoat.id?{...b,explorers:(b.explorers||[]).filter(id=>id!==exp.id)}:b),
+                explorers:prev.explorers.map(x=>x.id===exp.id?{...x,r,c,state:'tierra',hasMovedThisTurn:true}:x),
+                movePts:newPts,
+                selectedExplorer:null,
+                phaseDone:newPts<=0,
+              };
+            }
+          }
+
+          // ── CASE B: explorer walks to an adjacent boat → BOARD ──
+          if(targetBoat && (targetBoat.explorers||[]).length<(targetBoat.capacity||3) && !expOnBoat){
+            addLog(`J${prev.currentPlayer} aborda el barco en F${r+1}C${c+1}. ${newPts} pts.`,'info');
+            return{
+              ...base,
+              boats:prev.boats.map(b=>b.id===targetBoat.id?{...b,explorers:[...(b.explorers||[]),exp.id]}:b),
+              explorers:prev.explorers.map(x=>x.id===exp.id?{...x,r,c,state:'nadando',hasMovedThisTurn:true}:x),
+              movePts:newPts,
+              selectedExplorer:null,
+              phaseDone:newPts<=0,
+            };
+          }
+
+          // ── CASE C: classic explorer move ──
           const newState=onMainland?'salvado':(onLand?'tierra':'nadando');
+          let newScores=prev.scores;
+          if(onMainland){
+            newScores={...prev.scores,[prev.currentPlayer]:(prev.scores[prev.currentPlayer]||0)+(exp.value||0)};
+            addLog(`¡Explorador salvado! J${prev.currentPlayer} +${exp.value} pts (valor ${exp.value}).`,'action');
+          }
           addLog(`J${prev.currentPlayer} → F${r+1}C${c+1} (${newState}). ${newPts} pts.`);
-          return{...base,explorers:prev.explorers.map(e=>e.id===prev.selectedExplorer?{...e,r,c,state:newState}:e),movePts:newPts,selectedExplorer:null,phaseDone:newPts<=0};
+          return{
+            ...base,
+            explorers:prev.explorers.map(x=>x.id===prev.selectedExplorer?{...x,r,c,state:newState,hasMovedThisTurn:true}:x),
+            movePts:newPts,
+            selectedExplorer:null,
+            phaseDone:newPts<=0,
+            scores:newScores,
+          };
         }
         const mine=prev.explorers.filter(e=>e.r===r&&e.c===c&&e.player===prev.currentPlayer&&e.state!=='salvado'&&e.state!=='eliminado');
         if(mine.length>0){addLog(`Explorador seleccionado en F${r+1}C${c+1}.`,'info');return{...base,selectedExplorer:mine[0].id};}
         return{...base,selectedExplorer:null};
       }
-      // Phase 3: remove tile
+      // Phase 3: remove tile — official order Playa→Bosque→Montaña
       if(prev.phase===3&&removableSet.has(key)){
         const tile=prev.tiles.find(t=>t.r===r&&t.c===c&&!t.removed);
         if(!tile)return base;
+        // Official removal priority: must pick lowest surviving height among edge tiles.
+        const edge=getEdgeTiles(prev.tiles);
+        const minH=Math.min(...edge.map(t=>t.altura));
+        if(tile.altura>minH){
+          addLog(`Debes hundir primero una loseta de altura ${minH} (Playa antes de Bosque antes de Montaña).`,'warn');
+          return prev;
+        }
         addLog(`Terreno retirado: ${tile.tipo} h${tile.altura} en F${r+1}C${c+1}.`,'warn');
         addLog(`↳ Revelado: ${ACTION_INFO[tile.accion]?.label} — ${ACTION_INFO[tile.accion]?.desc}`);
         const removingTiles=prev.tiles.map(t=>t.id===tile.id?{...t,removing:true}:t);
         setTimeout(()=>{
           setGs(p2=>{
             const finalTiles=p2.tiles.map(t=>t.id===tile.id?{...t,removing:false,removed:true}:t);
-            let newBoats=[...p2.boats],newCreatures=[...p2.creatures];
-            if(tile.accion==='INM_Barco'){const adj=getAdjacentCells(r,c).find(([ar,ac])=>isSeaCell(ar,ac));if(adj)newBoats=[...newBoats,{id:`bt_${Date.now()}`,r:adj[0],c:adj[1],capacity:3,explorers:[]}];}
-            if(tile.accion==='INM_Tiburon'){const rv=newCreatures.find(c=>c.tipo==='Tiburon'&&c.estado==='reserva');if(rv){const adj=getAdjacentCells(r,c).find(([ar,ac])=>isSeaCell(ar,ac));if(adj)newCreatures=newCreatures.map(c=>c.id===rv.id?{...c,r:adj[0],c:adj[1],estado:'activo'}:c);}}
-            if(tile.accion==='INM_Ballena'){const rv=newCreatures.find(c=>c.tipo==='Ballena'&&c.estado==='reserva');if(rv){const adj=getAdjacentCells(r,c).find(([ar,ac])=>isSeaCell(ar,ac));if(adj)newCreatures=newCreatures.map(c=>c.id===rv.id?{...c,r:adj[0],c:adj[1],estado:'activo'}:c);}}
-            return{...p2,tiles:finalTiles,boats:newBoats,creatures:newCreatures,phaseDone:true,gameOver:tile.accion==='INM_Volcan'};
+            let newBoats=[...p2.boats], newCreatures=[...p2.creatures], newExplorers=[...p2.explorers];
+            let newHands={...p2.hands}, newScores={...p2.scores};
+            let gameOver=false;
+            const ac=tile.accion;
+            // Anyone standing on the sunk tile falls into the water.
+            newExplorers=newExplorers.map(e=>(e.r===r&&e.c===c&&e.state==='tierra')?{...e,state:'nadando'}:e);
+
+            // ── GREEN (immediate) tiles ─────────────────────────────────
+            if(ac==='INM_Volcan'){ gameOver=true; addLog('¡VOLCÁN! Fin de partida.','error'); }
+            else if(ac==='INM_Barco'){
+              const adj=getAdjacentCells(r,c).find(([ar,ac])=>isEffectiveSea(ar,ac,p2.tiles));
+              if(adj) newBoats.push({id:`bt_${Date.now()}`,r:adj[0],c:adj[1],capacity:3,explorers:[]});
+            }
+            else if(ac==='INM_Tiburon'){
+              const rv=newCreatures.find(c=>c.tipo==='Tiburon'&&c.estado==='reserva');
+              const adj=getAdjacentCells(r,c).find(([ar,ac])=>isEffectiveSea(ar,ac,p2.tiles));
+              if(rv&&adj) newCreatures=newCreatures.map(c=>c.id===rv.id?{...c,r:adj[0],c:adj[1],estado:'activo'}:c);
+            }
+            else if(ac==='INM_Ballena'){
+              const rv=newCreatures.find(c=>c.tipo==='Ballena'&&c.estado==='reserva');
+              const adj=getAdjacentCells(r,c).find(([ar,ac])=>isEffectiveSea(ar,ac,p2.tiles));
+              if(rv&&adj) newCreatures=newCreatures.map(c=>c.id===rv.id?{...c,r:adj[0],c:adj[1],estado:'activo'}:c);
+            }
+            else if(ac==='INM_Remolino'){
+              // Whirlpool: clears this cell AND the 6 adjacent sea cells.
+              const kill=new Set([`${r},${c}`, ...getSeaNeighbours(r,c).map(([a,b])=>`${a},${b}`)]);
+              newExplorers=newExplorers.map(e=>kill.has(`${e.r},${e.c}`)&&(e.state==='nadando'||e.state==='tierra')?{...e,state:'eliminado'}:e);
+              newBoats=newBoats.filter(b=>!kill.has(`${b.r},${b.c}`));
+              newCreatures=newCreatures.map(c=>kill.has(`${c.r},${c.c}`)&&c.estado==='activo'?{...c,r:null,c:null,estado:'reserva'}:c);
+              addLog('Remolino: elimina todo en 7 casillas.','error');
+            }
+            // ── RED (to hand) tiles — goes to the current player's hand ─
+            else if(ac==='MAN_Vientos'||ac==='MAN_Delfin'||ac==='MAN_Serpiente'||
+                    ac==='MAN_Ballena'||ac==='MAN_Tiburon'||ac==='DEF_Tiburon'||ac==='DEF_Ballena'){
+              const map={
+                MAN_Vientos:'vientos', MAN_Delfin:'delfin', MAN_Serpiente:'serpiente',
+                MAN_Ballena:'ballena', MAN_Tiburon:'tiburon',
+                DEF_Tiburon:'defensa', DEF_Ballena:'defensa',
+              };
+              const base=HAND_TILE_TYPES.find(t=>t.id===map[ac]);
+              if(base){
+                const cp=p2.currentPlayer;
+                const card={...base,uid:`${base.id}_${Date.now()}_${Math.random().toString(36).slice(2,6)}`};
+                newHands={...newHands,[cp]:[...(newHands[cp]||[]),card]};
+                addLog(`J${cp} añade "${base.label}" a su mano.`,'action');
+              }
+            }
+            return{
+              ...p2, tiles:finalTiles, boats:newBoats, creatures:newCreatures,
+              explorers:newExplorers, hands:newHands, scores:newScores,
+              phaseDone:true, gameOver,
+            };
           });
         },560);
         return{...prev,tiles:removingTiles,selectedCell:key};
@@ -623,13 +1060,24 @@ function App(){
   const handleNextPhase=useCallback(()=>{
     setGs(prev=>{
       if(prev.gameOver)return prev;
+      // Phase 3 is mandatory — cannot advance until a tile has been sunk.
+      if(prev.phase===3 && !prev.phaseDone){
+        return {...prev, log:[...prev.log.slice(-59),{type:'warn',text:'Debes hundir un terreno antes de avanzar.'}]};
+      }
+      // Phase 4 is mandatory — dice must have been rolled (creature may remain still).
+      if(prev.phase===4 && !prev.diceResult){
+        return {...prev, log:[...prev.log.slice(-59),{type:'warn',text:'Debes lanzar el dado de criatura.'}]};
+      }
       const next=prev.phase<4?prev.phase+1:1;
       const isNew=prev.phase===4;
       const np=isNew?(prev.currentPlayer%prev.numPlayers)+1:prev.currentPlayer;
       const nt=isNew?prev.turn+1:prev.turn;
-      const hands=isNew?{...prev.hands,[np]:generateHand(3)}:prev.hands;
+      // Hand tokens accumulate from sunk red-border tiles — no auto-regen per turn.
+      const hands=isNew?{...prev.hands,[np]:prev.hands[np]||[]}:prev.hands;
+      // Reset per-turn movement flags when turn rotates.
+      const explorers=isNew?prev.explorers.map(e=>({...e,hasMovedThisTurn:false})):prev.explorers;
       const msg=isNew?`── Turno ${nt} — J${np} (${PLAYER_DATA[np].colorName}) ──`:`Fase ${next} — ${PHASE_INFO[next-1].label}.`;
-      return{...prev,phase:next,currentPlayer:np,turn:nt,movePts:3,diceResult:null,diceRolling:false,selectedExplorer:null,selectedCreature:null,selectedCell:null,phaseDone:false,hands,log:[...prev.log.slice(-59),{type:'action',text:msg}]};
+      return{...prev,phase:next,currentPlayer:np,turn:nt,movePts:3,diceResult:null,diceRolling:false,selectedExplorer:null,selectedCreature:null,selectedCell:null,phaseDone:false,hands,explorers,log:[...prev.log.slice(-59),{type:'action',text:msg}]};
     });
   },[]);
 
@@ -662,7 +1110,7 @@ function App(){
     });
   },[]);
 
-  const newGame=(np)=>{localStorage.removeItem('island_v3');setGs(createState(np||gs.numPlayers));};
+  const newGame=(np)=>{localStorage.removeItem('island_v4');setGs(createState(np||gs.numPlayers));};
 
   const tilesLeft=gs.tiles.filter(t=>!t.removed&&!t.removing).length;
   const swimming=gs.explorers.filter(e=>e.state==='nadando').length;
@@ -702,9 +1150,10 @@ function App(){
               tiles={gs.tiles}
               explorers={gs.explorers.filter(e=>e.state!=='salvado'&&e.state!=='eliminado')}
               creatures={gs.creatures} boats={gs.boats}
-              selected={gs.selectedCell} movableSet={allMovable}
-              removableSet={showRemovable?removableSet:new Set()}
-              onSelectCell={handleSelectCell} onCreatureClick={handleCreatureClick}
+              selected={gs.selectedCell} movableSet={scrubbing?new Set():allMovable}
+              removableSet={(scrubbing||!showRemovable)?new Set():removableSet}
+              onSelectCell={scrubbing?(()=>{}):handleSelectCell}
+              onCreatureClick={scrubbing?(()=>{}):handleCreatureClick}
               selectedCreature={gs.selectedCreature} showLabels={tweaks.showLabels} dark={dark}
             />
           </div>
@@ -764,6 +1213,7 @@ function App(){
               <div style={{fontSize:9,color:th.muted,textTransform:'uppercase',letterSpacing:'0.1em',marginBottom:7}}>Puntos de Movimiento</div>
               <div style={{display:'flex',gap:5,marginBottom:5}}>{[1,2,3].map(i=><div key={i} style={{flex:1,height:7,borderRadius:4,background:i<=gs.movePts?'#10b981':th.border,boxShadow:i<=gs.movePts?'0 1px 4px rgba(16,185,129,0.4)':'none',transition:'all 0.2s'}}/>)}</div>
               <div style={{fontSize:10,color:th.muted}}>{gs.movePts}/3 puntos restantes</div>
+              <div style={{fontSize:9,color:th.muted,marginTop:6,lineHeight:1.4,fontStyle:'italic'}}>Los nadadores solo pueden moverse 1 casilla por turno.</div>
             </div>
           )}
           {gs.phase===4&&<DiceDisplay result={gs.diceResult} rolling={gs.diceRolling} th={th}/>}
@@ -776,11 +1226,47 @@ function App(){
           <ActionLog entries={gs.log} th={th}/>
         </div>
 
+        {/* Simulator controls + history scrubber */}
+        <div style={{padding:'8px 16px',borderTop:`1.5px solid ${th.border}`,flexShrink:0,background:dark?'rgba(59,130,246,0.05)':'#f8fafc'}}>
+          <div style={{fontSize:9,color:th.muted,textTransform:'uppercase',letterSpacing:'0.12em',marginBottom:6,fontWeight:700}}>Simulador</div>
+          <div style={{display:'flex',gap:6,alignItems:'center',marginBottom:6}}>
+            <button onClick={()=>{setViewIdx(-1);setSimulating(s=>!s);}} disabled={gsLive.gameOver}
+              style={{flex:1,padding:'5px 0',background:simulating?'#dc2626':th.accent,border:'none',borderRadius:5,color:'#fff',fontSize:10,fontWeight:700,cursor:'pointer',fontFamily:'inherit',letterSpacing:'0.05em'}}>
+              {simulating?'⏸ Pausar':'▶ Simular'}
+            </button>
+            <button onClick={()=>{setSimulating(false);setViewIdx(-1);aiStep();}} disabled={gsLive.gameOver||scrubbing}
+              style={{padding:'5px 9px',background:'transparent',border:`1.5px solid ${th.border}`,borderRadius:5,color:th.text,fontSize:10,fontWeight:700,cursor:'pointer',fontFamily:'inherit'}} title="1 paso">⏭</button>
+          </div>
+          <div style={{fontSize:9,color:th.muted,marginBottom:3}}>Velocidad: {simSpeed}ms</div>
+          <input type="range" min={120} max={2000} step={40} value={simSpeed} onChange={e=>setSimSpeed(parseInt(e.target.value))} style={{width:'100%',accentColor:th.accent,marginBottom:8}}/>
+          {history.length>1&&(
+            <>
+              <div style={{fontSize:9,color:th.muted,marginBottom:3,display:'flex',justifyContent:'space-between'}}>
+                <span>Historial{scrubbing?' (visualizando)':' (en vivo)'}</span>
+                <span style={{fontFamily:'monospace'}}>{scrubbing?`${viewIdx+1}/${history.length}`:`live`}</span>
+              </div>
+              <div style={{display:'flex',gap:4,alignItems:'center'}}>
+                <button onClick={()=>setViewIdx(i=>Math.max(0,(i<0?history.length-1:i)-1))}
+                  style={{padding:'3px 8px',background:'transparent',border:`1px solid ${th.border}`,borderRadius:4,color:th.text,fontSize:11,cursor:'pointer'}}>◀</button>
+                <input type="range" min={0} max={history.length-1} value={scrubbing?viewIdx:history.length-1}
+                  onChange={e=>{setSimulating(false);setViewIdx(parseInt(e.target.value));}}
+                  style={{flex:1,accentColor:th.accent}}/>
+                <button onClick={()=>setViewIdx(i=>(i<0?-1:(i+1>=history.length-1?-1:i+1)))}
+                  style={{padding:'3px 8px',background:'transparent',border:`1px solid ${th.border}`,borderRadius:4,color:th.text,fontSize:11,cursor:'pointer'}}>▶</button>
+                <button onClick={()=>setViewIdx(-1)} disabled={!scrubbing}
+                  style={{padding:'3px 6px',background:scrubbing?th.accent:'transparent',border:`1px solid ${th.border}`,borderRadius:4,color:scrubbing?'#fff':th.muted,fontSize:9,cursor:scrubbing?'pointer':'default',fontFamily:'inherit',fontWeight:600}}>Live</button>
+              </div>
+            </>
+          )}
+        </div>
+
         {/* Buttons */}
-        <div style={{padding:'10px 16px',borderTop:`1.5px solid ${th.border}`,flexShrink:0,display:'flex',flexDirection:'column',gap:7}}>
+        <div style={{padding:'10px 16px',borderTop:`1.5px solid ${th.border}`,flexShrink:0,display:'flex',flexDirection:'column',gap:7,opacity:scrubbing?0.4:1,pointerEvents:scrubbing?'none':'auto'}}>
           {gs.phase===4&&!gs.diceResult&&<button onClick={handleRollDice} style={bS(th.accent)}>◎ Lanzar Dado</button>}
           {(gs.phase!==4||gs.diceResult)&&<button onClick={handleNextPhase} style={bS(th.accent)}>{gs.phase===1?'→ Siguiente Fase':gs.phase===2?'✓ Fin Movimiento':gs.phase===3?'✓ Confirmar Retiro':'✓ Fin Turno'}</button>}
-          <button onClick={()=>{addLog(`J${gs.currentPlayer} omite la fase ${gs.phase}.`,'info');handleNextPhase();}} style={bS('transparent',th.muted,th.border)}>Omitir Fase</button>
+          {(gs.phase===1||gs.phase===2)&&(
+            <button onClick={()=>{addLog(`J${gs.currentPlayer} omite la fase ${gs.phase}.`,'info');handleNextPhase();}} style={bS('transparent',th.muted,th.border)}>Omitir Fase</button>
+          )}
         </div>
       </aside>
 
