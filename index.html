@@ -70,7 +70,8 @@ const PLAYER_DATA = {
 const BOARD_ROWS = 9, BOARD_COLS = 11;
 const ISLAND_CENTER = { r:4, c:5 };
 // Mainland safezones — overridable via RULES.mainland_corners (loaded from Sheet).
-let MAINLAND_CORNERS = [[0,10],[8,10]];
+// Default: 4 corners after column 12 was removed (display 1,1; 9,1; 1,11; 9,11 → 0-indexed (0,0)(8,0)(0,10)(8,10)).
+let MAINLAND_CORNERS = [[0,0],[0,10],[8,0],[8,10]];
 
 // Odd-r offset → cube coords, hex distance.
 function _toCube(r,c){const x=c-((r-(r&1))>>1),z=r,y=-x-z;return[x,y,z];}
@@ -192,10 +193,11 @@ const RULES={
   auto_board_on_enter_boat_cell: true,
   whirlpool_radius: 1,           // 1 = center + 6 adjacents
   num_explorers_per_player: 10,
+  land_to_sea_cost: 2,           // Movement points spent when stepping from land directly into sea
   initial_boats_per_player: 1,
   // Cell-list rule knobs — pipe-separated "r,c|r,c|…" in the Sheet, parsed via _parseCellList.
-  mainland_corners:           [[0,10],[8,10]],
-  fixed_serpent_positions:    [[1,0],[7,0],[1,9],[7,9]],
+  mainland_corners:           [[0,0],[0,10],[8,0],[8,10]],
+  fixed_serpent_positions:    [[4,5],[1,0],[7,0],[1,9],[7,9]], // center + 4 sea cells
   boat_starting_positions:    [[1,2],[7,2],[1,7],[7,7]],
   // Default tweak switch positions (used unless localStorage has stored values)
   tweak_default_showValues: true,
@@ -226,19 +228,62 @@ function diceStepsFor(creatureTipo){
   if(creatureTipo==='Serpiente') return RULES.serpent_steps;
   return 1;
 }
-// Returns a kill list (array of explorer ids) for swimmers adjacent to (or co-located with) any active shark.
+// Returns a kill list (array of explorer ids) for swimmers SHARING the cell with any active shark.
+// Per official rules: shark eats only swimmers on its EXACT cell (not adjacent).
 function sharksKillAdjacentSwimmers(explorers, creatures){
   if(!RULES.shark_kills_adjacent_swimmer) return [];
   const kills=[];
   const sharks=creatures.filter(c=>c.tipo==='Tiburon'&&c.estado==='activo'&&c.r!==null);
   for(const s of sharks){
-    const ring=[[s.r,s.c], ...getAdjacentCells(s.r,s.c)];
     for(const e of explorers){
       if(e.state!=='nadando') continue;
-      if(ring.some(([rr,cc])=>rr===e.r&&cc===e.c)) kills.push(e.id);
+      if(e.r===s.r && e.c===s.c) kills.push(e.id);
     }
   }
   return [...new Set(kills)];
+}
+// Resolve all creature-on-target collisions for entities sharing cells.
+// Returns { explorers, boats, creatures, log } with collisions applied.
+function resolveCreatureCollisions(explorers, boats, creatures){
+  const log=[];
+  let nExp=explorers.slice(), nBoats=boats.slice(), nCreat=creatures.slice();
+  // Serpent: destroys boats (and all occupants) sharing its cell + any swimmer on the same cell.
+  for(const cr of nCreat){
+    if(cr.estado!=='activo'||cr.r===null) continue;
+    if(cr.tipo==='Serpiente'){
+      const boat=nBoats.find(b=>b.r===cr.r&&b.c===cr.c);
+      if(boat){
+        const occ=new Set(boat.explorers||[]);
+        nExp=nExp.map(e=>occ.has(e.id)?{...e,state:'eliminado'}:e);
+        nBoats=nBoats.filter(b=>b.id!==boat.id);
+        log.push(`Serpiente devora barco con ${occ.size} tripulante(s).`);
+      }
+      const swimmers=nExp.filter(e=>e.r===cr.r&&e.c===cr.c&&e.state==='nadando');
+      if(swimmers.length>0){
+        const ids=new Set(swimmers.map(e=>e.id));
+        nExp=nExp.map(e=>ids.has(e.id)?{...e,state:'eliminado'}:e);
+        log.push(`Serpiente elimina ${ids.size} nadador(es).`);
+      }
+    }
+    if(cr.tipo==='Ballena'){
+      const boat=nBoats.find(b=>b.r===cr.r&&b.c===cr.c);
+      if(boat){
+        const occ=new Set(boat.explorers||[]);
+        nExp=nExp.map(e=>occ.has(e.id)?{...e,state:'nadando',r:cr.r,c:cr.c}:e);
+        nBoats=nBoats.filter(b=>b.id!==boat.id);
+        log.push(`Ballena hunde barco; ${occ.size} pasajero(s) ahora nadan.`);
+      }
+    }
+    if(cr.tipo==='Tiburon'){
+      const swimmers=nExp.filter(e=>e.r===cr.r&&e.c===cr.c&&e.state==='nadando');
+      if(swimmers.length>0){
+        const ids=new Set(swimmers.map(e=>e.id));
+        nExp=nExp.map(e=>ids.has(e.id)?{...e,state:'eliminado'}:e);
+        log.push(`Tiburón elimina ${ids.size} nadador(es).`);
+      }
+    }
+  }
+  return {explorers:nExp,boats:nBoats,creatures:nCreat,log};
 }
 const PHASE_INFO=[
   {id:1,label:'Ficha de Mano',  desc:'Juega una ficha de tu mano (opcional)'},
@@ -362,8 +407,9 @@ const{useState,useCallback,useEffect,useMemo,useRef}=React;
 // ── Hex grid math ────────────────────────────────────────────────────────────
 const HS = 34;                        // circumradius
 const HW = Math.sqrt(3) * HS;        // pointy-top: width = √3·r
-const SVG_W = HW * 12.5;
-const SVG_H = HS * 14;
+// SVG width sized to fit BOARD_COLS columns (with 0.5 hex offset for odd rows + 0.5 right padding)
+const SVG_W = HW * (BOARD_COLS + 0.5);
+const SVG_H = HS * (BOARD_ROWS * 1.5 + 1.5);
 
 function hCtr(r,c){ return[HW*0.5+c*HW+(r&1)*HW*0.5, HS+r*HS*1.5]; }
 function hPts(cx,cy){ return Array.from({length:6},(_,i)=>{const a=Math.PI/3*i-Math.PI/6;return`${(cx+HS*Math.cos(a)).toFixed(1)},${(cy+HS*Math.sin(a)).toFixed(1)}`;}).join(' '); }
@@ -407,7 +453,7 @@ function SvgCreature({x,y,tipo,selected,onClick}){
 }
 
 // ── Hex cell ─────────────────────────────────────────────────────────────────
-function HexCell({r,c,terrain,tile,explorers,creatures,boats,selected,movable,removable,onSelect,onCreatureClick,selectedCreature,showLabels,dark,hideSymbols}){
+function HexCell({r,c,terrain,tile,explorers,creatures,boats,selected,movable,removable,onSelect,onCreatureClick,selectedCreature,selectedBoatId,showLabels,dark,hideSymbols}){
   const[cx,cy]=hCtr(r,c);
   const pts=hPts(cx,cy);
   const isIsland=tile&&!tile.removed&&!tile.removing;
@@ -456,8 +502,12 @@ function HexCell({r,c,terrain,tile,explorers,creatures,boats,selected,movable,re
       {/* Boat — with occupant indicator (small dots stacked on the bow) */}
       {boats.slice(0,1).map(b=>{
         const occ=(b.explorers||[]);
+        const isSel = selectedBoatId === b.id;
         return(
           <g key={b.id}>
+            {isSel && (
+              <circle cx={cx} cy={cy+2} r={HS*.45} fill="rgba(34,211,238,0.15)" stroke="#22d3ee" strokeWidth={2.5} strokeDasharray="3 2"/>
+            )}
             <text x={cx} y={cy+4} textAnchor="middle" fontSize={HS*.42} fontFamily="sans-serif">⛵</text>
             {/* Capacity badge: filled circles for occupants, empty for slots */}
             {[0,1,2].map(i=>{
@@ -485,7 +535,7 @@ function HexCell({r,c,terrain,tile,explorers,creatures,boats,selected,movable,re
 }
 
 // ── Hex Board ────────────────────────────────────────────────────────────────
-function HexBoard({tiles,explorers,creatures,boats,selected,movableSet,removableSet,onSelectCell,onCreatureClick,selectedCreature,showLabels,dark,hideSymbols}){
+function HexBoard({tiles,explorers,creatures,boats,selected,movableSet,removableSet,onSelectCell,onCreatureClick,selectedCreature,selectedBoatId,showLabels,dark,hideSymbols}){
   const tileMap={},expMap={},boatMap={};
   tiles.forEach(t=>{tileMap[`${t.r},${t.c}`]=t;});
   explorers.forEach(e=>{const k=`${e.r},${e.c}`;(expMap[k]=expMap[k]||[]).push(e);});
@@ -513,6 +563,7 @@ function HexBoard({tiles,explorers,creatures,boats,selected,movableSet,removable
             selected={selected===key} movable={movableSet.has(key)}
             removable={removableSet.has(key)} onSelect={onSelectCell}
             onCreatureClick={onCreatureClick} selectedCreature={selectedCreature}
+            selectedBoatId={selectedBoatId}
             showLabels={showLabels} dark={dark} hideSymbols={hideSymbols}/>
         );
       }))}
@@ -594,24 +645,49 @@ function ActionLog({entries,th}){
 
 function SelectedInfo({info,th}){
   if(!info)return null;
-  const hasContent=info.tile||info.explorers?.length>0||info.creatures?.length>0;
+  const hasContent=info.tile||info.explorers?.length>0||info.creatures?.length>0||info.boats?.length>0;
   if(!hasContent)return(
     <div style={{padding:'8px 12px',background:th.card,border:`1.5px solid ${th.border}`,borderRadius:8}}>
       <div style={{fontSize:11,fontWeight:600,color:th.text}}>{info.coord}</div>
-      <div style={{fontSize:10,color:th.muted,marginTop:2}}>Mar — casilla de agua</div>
+      <div style={{fontSize:10,color:th.muted,marginTop:2}}>Mar — casilla de agua vacía</div>
     </div>
   );
+  // Group explorers by player to show counts
+  const byPlayer={};
+  (info.explorers||[]).forEach(e=>{(byPlayer[e.player]=byPlayer[e.player]||[]).push(e);});
+  // Identify which explorers are aboard a boat at this cell
+  const boat=info.boats?.[0];
+  const aboardSet=new Set(boat?.explorers||[]);
   return(
     <div style={{padding:'10px 12px',background:th.card,border:`1.5px solid #fde68a`,borderRadius:8}}>
       <div style={{fontSize:9,color:'#d97706',textTransform:'uppercase',letterSpacing:'0.1em',marginBottom:5}}>Seleccionado</div>
       <div style={{fontSize:13,fontWeight:600,color:th.text,marginBottom:5}}>{info.coord}</div>
       {info.tile&&!info.tile.removed&&(
-        <div style={{display:'flex',gap:6,flexWrap:'wrap',marginBottom:4}}>
+        <div style={{display:'flex',gap:6,flexWrap:'wrap',marginBottom:6}}>
           <span style={{fontSize:10,padding:'2px 7px',borderRadius:10,background:info.tile.tipo==='Playa'?'#e8c87a':info.tile.tipo==='Bosque'?'#4a8c3f':'#8a7ba0',color:info.tile.tipo==='Playa'?'#7a5a18':info.tile.tipo==='Bosque'?'#fff':'#fff',fontWeight:600}}>{info.tile.tipo} h{info.tile.altura}</span>
           {info.tile.accion&&<span style={{fontSize:10,color:ACTION_INFO[info.tile.accion]?.color,fontWeight:600}}>{ACTION_INFO[info.tile.accion]?.symbol} {ACTION_INFO[info.tile.accion]?.label}</span>}
         </div>
       )}
-      {info.explorers?.length>0&&<div style={{display:'flex',gap:4,flexWrap:'wrap'}}>{info.explorers.map(e=><span key={e.id} style={{fontSize:10,padding:'1px 6px',borderRadius:10,background:`${PLAYER_DATA[e.player]?.hex}22`,color:PLAYER_DATA[e.player]?.hex,border:`1px solid ${PLAYER_DATA[e.player]?.hex}44`,fontWeight:600}}>J{e.player}</span>)}</div>}
+      {boat&&(
+        <div style={{fontSize:10,padding:'4px 7px',borderRadius:6,background:'rgba(96,165,250,0.15)',border:'1px solid #60a5fa44',marginBottom:6,display:'flex',justifyContent:'space-between'}}>
+          <span style={{fontWeight:600,color:th.text}}>⛵ Barco</span>
+          <span style={{color:th.muted}}>{(boat.explorers||[]).length}/{boat.capacity||3} tripulantes</span>
+        </div>
+      )}
+      {Object.entries(byPlayer).map(([p,exps])=>(
+        <div key={p} style={{fontSize:10,marginBottom:3,display:'flex',gap:4,alignItems:'center'}}>
+          <span style={{padding:'1px 6px',borderRadius:10,background:`${PLAYER_DATA[p]?.hex}22`,color:PLAYER_DATA[p]?.hex,border:`1px solid ${PLAYER_DATA[p]?.hex}44`,fontWeight:600}}>J{p}</span>
+          <span style={{color:th.muted}}>×{exps.length}</span>
+          {exps.some(e=>aboardSet.has(e.id))&&<span style={{color:th.muted,fontSize:9}}>· {exps.filter(e=>aboardSet.has(e.id)).length} a bordo</span>}
+        </div>
+      ))}
+      {info.creatures?.length>0&&(
+        <div style={{display:'flex',gap:4,flexWrap:'wrap',marginTop:5,paddingTop:5,borderTop:`1px solid ${th.border}`}}>
+          {info.creatures.map(cr=>(
+            <span key={cr.id} style={{fontSize:10,padding:'1px 6px',borderRadius:10,background:cr.tipo==='Tiburon'?'#fee2e2':cr.tipo==='Ballena'?'#dbeafe':cr.tipo==='Serpiente'?'#dcfce7':'#cffafe',color:cr.tipo==='Tiburon'?'#991b1b':cr.tipo==='Ballena'?'#1e40af':cr.tipo==='Serpiente'?'#166534':'#0e7490',fontWeight:600}}>{cr.tipo}</span>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -719,6 +795,20 @@ function App(){
       return()=>clearTimeout(t);
     }
   },[gs.phase,gs.movePts,gs.gameOver]);
+
+  // ── Phase 2 auto-skip when active player has no live entities to move ─────
+  useEffect(()=>{
+    if(gs.gameOver) return;
+    if(gs.phase!==2) return;
+    const live=(gs.explorers||[]).some(e=>e.player===gs.currentPlayer && e.state!=='salvado' && e.state!=='eliminado');
+    if(!live){
+      const t=setTimeout(()=>{
+        setGs(p=>({...p,log:[...p.log.slice(-59),{type:'info',text:`J${p.currentPlayer} sin exploradores vivos — fase 2 omitida.`}]}));
+        handleNextPhase();
+      },200);
+      return()=>clearTimeout(t);
+    }
+  },[gs.phase,gs.currentPlayer,gs.explorers,gs.gameOver]);
 
   // ── Google Sheets backend sync (mock-backed while USE_MOCK_BACKEND=true) ──
   useEffect(()=>{
@@ -1067,11 +1157,13 @@ function App(){
           const boat=prev.boats.find(b=>b.id===prev.selectedBoat);
           if(!boat) return {...base,selectedBoat:null};
           if(!isEffectiveSea(r,c,prev.tiles)){addLog('El barco solo navega en agua.','warn');return prev;}
+          // Boat-to-boat collision: cannot move onto another boat's cell.
+          if(prev.boats.some(b=>b.id!==boat.id&&b.r===r&&b.c===c)){
+            addLog('Otro barco ocupa esa casilla.','warn'); return prev;
+          }
           const occIds=new Set(boat.explorers||[]);
           const newPts=prev.movePts-1;
-          // Co-located swimmers NOT in the boat stay put. Only occupants travel.
           let newExplorers=prev.explorers.map(x=>occIds.has(x.id)?{...x,r,c,hasMovedThisTurn:true}:x);
-          // Auto-board any swimmer already at target cell if there's room
           if(RULES.auto_board_on_enter_boat_cell){
             const cap=boat.capacity||RULES.boat_capacity;
             const swimmersAtTarget=newExplorers.filter(e=>e.r===r&&e.c===c&&e.state==='nadando'&&!occIds.has(e.id));
@@ -1080,9 +1172,12 @@ function App(){
             if(toBoard.length>0) addLog(`${toBoard.length} nadador(es) suben al barco al llegar.`,'info');
           }
           const newBoats=prev.boats.map(b=>b.id===boat.id?{...b,r,c,explorers:[...occIds]}:b);
+          // Creature-on-cell auto-collision (serpent on target = boat destroyed, etc.)
+          const res=resolveCreatureCollisions(newExplorers,newBoats,prev.creatures);
+          if(res.log.length>0) res.log.forEach(t=>addLog(t,'error'));
           addLog(`Barco (${occIds.size} trip.) → F${r+1}C${c+1}. ${newPts} pts.`,'action');
-          // Apply shark adjacency kill (boat occupants are inside boat — they're not "swimmers" in adjacency check)
-          return {...base,boats:newBoats,explorers:newExplorers,movePts:newPts,selectedBoat:null,phaseDone:newPts<=0};
+          return {...base,boats:res.boats,explorers:res.explorers,creatures:res.creatures,
+                   movePts:newPts,selectedBoat:null,phaseDone:newPts<=0};
         }
         if(prev.selectedExplorer&&movableSet.has(key)){
           if(prev.movePts<=0){addLog('Máximo 3 movimientos alcanzado.','warn');return prev;}
@@ -1102,17 +1197,30 @@ function App(){
           // ── CASE A: explorer is on a boat → move the WHOLE boat (carries all passengers) ──
           if(expOnBoat){
             if(targetSea && !targetBoat){
-              // Boat moves to adjacent sea, carrying all passengers (1 movement point = 3 explorers moved)
+              // Boat moves to adjacent sea, carrying all passengers (1 movement point per move).
+              // Auto-board any swimmer already at the target cell if there's still room.
               const occIds=new Set(expOnBoat.explorers||[]);
+              const cap=expOnBoat.capacity||RULES.boat_capacity;
+              let nextExplorers=prev.explorers.map(x=>occIds.has(x.id)?{...x,r,c,hasMovedThisTurn:true}:x);
+              const freeSpots=Math.max(0,cap-occIds.size);
+              const swimmersAtTarget=nextExplorers.filter(e=>e.r===r&&e.c===c&&e.state==='nadando'&&!occIds.has(e.id));
+              const boarders=swimmersAtTarget.slice(0,freeSpots);
+              boarders.forEach(b=>occIds.add(b.id));
+              if(boarders.length>0) addLog(`${boarders.length} nadador(es) suben al barco al llegar.`,'info');
+              const newBoats=prev.boats.map(b=>b.id===expOnBoat.id?{...b,r,c,explorers:[...occIds]}:b);
+              // Resolve creature collisions on the new cell (e.g. boat lands on serpent → destroyed).
+              const res=resolveCreatureCollisions(nextExplorers,newBoats,prev.creatures);
+              if(res.log.length>0) res.log.forEach(t=>addLog(t,'error'));
               addLog(`Barco (${occIds.size} exp.) → F${r+1}C${c+1}. ${newPts} pts restantes.`,'action');
               return{
                 ...base,
-                boats:prev.boats.map(b=>b.id===expOnBoat.id?{...b,r,c}:b),
-                explorers:prev.explorers.map(x=>occIds.has(x.id)?{...x,r,c,hasMovedThisTurn:true}:x),
-                movePts:newPts,
-                selectedExplorer:null,
-                phaseDone:newPts<=0,
+                boats:res.boats, explorers:res.explorers, creatures:res.creatures,
+                movePts:newPts, selectedExplorer:null, phaseDone:newPts<=0,
               };
+            }
+            if(targetSea && targetBoat){
+              addLog('Otro barco ocupa esa casilla.','warn');
+              return prev;
             }
             if(onMainland){
               // Disembark onto mainland → salvado + scores
@@ -1156,19 +1264,38 @@ function App(){
           }
 
           // ── CASE C: classic explorer move ──
+          // Land→Sea costs RULES.land_to_sea_cost (default 2) per official ruleset.
+          const isLandToSea = exp.state==='tierra' && !onLand && !onMainland;
+          const cost = isLandToSea ? Math.max(1,Number(RULES.land_to_sea_cost||2)) : 1;
+          if(prev.movePts < cost){
+            addLog(`Cruzar al mar cuesta ${cost} pts; te queda ${prev.movePts}.`,'warn');
+            return prev;
+          }
+          const ptsAfter = prev.movePts - cost;
           const newState=onMainland?'salvado':(onLand?'tierra':'nadando');
           let newScores=prev.scores;
           if(onMainland){
             newScores={...prev.scores,[prev.currentPlayer]:(prev.scores[prev.currentPlayer]||0)+(exp.value||0)};
             addLog(`¡Explorador salvado! J${prev.currentPlayer} +${exp.value} pts (valor ${exp.value}).`,'action');
           }
-          addLog(`J${prev.currentPlayer} → F${r+1}C${c+1} (${newState}). ${newPts} pts.`);
+          addLog(`J${prev.currentPlayer} → F${r+1}C${c+1} (${newState}). -${cost} pt${cost>1?'s':''}. ${ptsAfter} restantes.`);
+          let newExplorers=prev.explorers.map(x=>x.id===prev.selectedExplorer?{...x,r,c,state:newState,hasMovedThisTurn:true}:x);
+          // Auto-board when stepping onto a cell that already has a boat with room.
+          let newBoats=prev.boats;
+          const landingBoat = newExplorers.find(x=>x.id===exp.id) && prev.boats.find(b=>b.r===r&&b.c===c&&(b.explorers||[]).length<(b.capacity||RULES.boat_capacity));
+          if(landingBoat && newState==='nadando' && RULES.auto_board_on_enter_boat_cell){
+            newBoats=prev.boats.map(b=>b.id===landingBoat.id?{...b,explorers:[...(b.explorers||[]),exp.id]}:b);
+            addLog(`Auto-aborda barco existente.`,'info');
+          }
+          // Resolve creature collisions on the new cell.
+          const res=resolveCreatureCollisions(newExplorers,newBoats,prev.creatures);
+          if(res.log.length>0) res.log.forEach(t=>addLog(t,'error'));
           return{
             ...base,
-            explorers:prev.explorers.map(x=>x.id===prev.selectedExplorer?{...x,r,c,state:newState,hasMovedThisTurn:true}:x),
-            movePts:newPts,
+            explorers:res.explorers, boats:res.boats, creatures:res.creatures,
+            movePts:ptsAfter,
             selectedExplorer:null,
-            phaseDone:newPts<=0,
+            phaseDone:ptsAfter<=0,
             scores:newScores,
           };
         }
@@ -1408,7 +1535,7 @@ function App(){
               removableSet={(scrubbing||!showRemovable)?new Set():removableSet}
               onSelectCell={scrubbing?(()=>{}):handleSelectCell}
               onCreatureClick={scrubbing?(()=>{}):handleCreatureClick}
-              selectedCreature={gs.selectedCreature} showLabels={tweaks.showLabels} dark={dark} hideSymbols={!!tweaks.hideSymbols}
+              selectedCreature={gs.selectedCreature} selectedBoatId={gs.selectedBoat} showLabels={tweaks.showLabels} dark={dark} hideSymbols={!!tweaks.hideSymbols}
             />
           </div>
         </div>
