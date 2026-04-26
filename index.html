@@ -205,6 +205,8 @@ const RULES={
   tweak_default_showLabels: true,
   tweak_default_hideSymbols: false,
   tweak_default_zoom: 1.4,
+  tweak_default_diceAnimation: true,
+  dice_animation_ms: 850,
 };
 function applyRulesFromConfig(rows){
   // rows = [{key,value}, …] from Sheet Config tab
@@ -451,6 +453,45 @@ const CC={
 };
 
 // ── SVG tokens ───────────────────────────────────────────────────────────────
+// Death blob — small organic shape (no text). Black/white in claro, red/white in oscuro.
+// Renders a subtly pulsing blobby cluster sized to the count.
+function DeathBlob({x,y,count,dark}){
+  if(!count||count<=0) return null;
+  // Color palette: claro (black/white), oscuro (red/white)
+  const fill = dark ? '#dc2626' : '#0a0a0a';
+  const ring = dark ? '#ffffff' : '#ffffff';
+  // Use deterministic offsets to layout 1-N blobs in a small wrapping grid
+  const items=Array.from({length:Math.min(count,6)},(_,i)=>i);
+  const positions=[
+    [0,0],[6,-3],[-6,-3],[6,4],[-6,4],[0,7]
+  ];
+  // Each blob is an irregular bezier shape, slightly different per i for organic feel
+  const blobPath=(seed)=>{
+    const r=2.2+ (seed%3)*0.25;
+    const o=(n)=>(((seed*7+n*13)%5)-2)*0.3;
+    return `M0,${-r+o(1)} C${r*0.8+o(2)},${-r+o(3)} ${r+o(4)},${-r*0.4+o(5)} ${r*0.95+o(6)},${0+o(1)} `+
+           `C${r+o(2)},${r*0.55+o(3)} ${r*0.6+o(4)},${r+o(5)} ${0+o(6)},${r*0.95+o(1)} `+
+           `C${-r*0.55+o(2)},${r+o(3)} ${-r+o(4)},${r*0.5+o(5)} ${-r*0.95+o(6)},${0+o(1)} `+
+           `C${-r+o(2)},${-r*0.5+o(3)} ${-r*0.6+o(4)},${-r+o(5)} ${0+o(6)},${-r+o(1)} Z`;
+  };
+  return(
+    <g transform={`translate(${x},${y})`} style={{pointerEvents:'none'}}>
+      {items.map((i)=>{
+        const[ox,oy]=positions[i];
+        return(
+          <g key={i} transform={`translate(${ox},${oy})`}>
+            <path d={blobPath(i+count)} fill={fill} stroke={ring} strokeWidth={0.6} opacity={0.9}>
+              <animate attributeName="opacity" values="0.55;0.95;0.55" dur={`${2.2+i*0.25}s`} repeatCount="indefinite"/>
+            </path>
+          </g>
+        );
+      })}
+      {count>6 && (
+        <circle cx={0} cy={-12} r={4} fill={fill} stroke={ring} strokeWidth={0.6} opacity={0.8}/>
+      )}
+    </g>
+  );
+}
 function SvgMeeple({x,y,color,sz=7}){
   return(
     <g transform={`translate(${x},${y})`}>
@@ -522,11 +563,16 @@ function HexCell({r,c,terrain,tile,explorers,creatures,boats,selected,movable,re
         </g>
       )}
 
-      {/* Meeples */}
-      {explorers.slice(0,4).map((e,i)=>(
-        <SvgMeeple key={e.id} x={cx+offsets[i][0]} y={cy+offsets[i][1]} color={PLAYER_DATA[e.player]?.hex||'#888'} sz={7}/>
-      ))}
-      {explorers.length>4&&<text x={cx} y={cy+2} textAnchor="middle" fontSize={8} fill="#fff" fontWeight="bold" fontFamily="monospace">+{explorers.length-4}</text>}
+      {/* Meeples — only living explorers (eliminated → DeathBlob below) */}
+      {(() => {
+        const alive=(explorers||[]).filter(e=>e.state!=='eliminado');
+        return(<>
+          {alive.slice(0,4).map((e,i)=>(
+            <SvgMeeple key={e.id} x={cx+offsets[i][0]} y={cy+offsets[i][1]} color={PLAYER_DATA[e.player]?.hex||'#888'} sz={7}/>
+          ))}
+          {alive.length>4&&<text x={cx} y={cy+2} textAnchor="middle" fontSize={8} fill="#fff" fontWeight="bold" fontFamily="monospace">+{alive.length-4}</text>}
+        </>);
+      })()}
 
       {/* Creatures */}
       {crits.map((cr,i)=>(
@@ -559,6 +605,12 @@ function HexCell({r,c,terrain,tile,explorers,creatures,boats,selected,movable,re
           </g>
         );
       })}
+
+      {/* Death blob — eliminated explorers leave a tasteful organic indicator */}
+      {(() => {
+        const dead = (explorers||[]).filter(e=>e.state==='eliminado').length;
+        return dead>0 ? <DeathBlob x={cx} y={cy+HS*.10} count={dead} dark={dark}/> : null;
+      })()}
 
       {/* Label */}
       {showLabels&&(
@@ -754,6 +806,7 @@ function makeTweakDefaults(){
     showLabels: !!RULES.tweak_default_showLabels,
     hideSymbols: !!RULES.tweak_default_hideSymbols,
     zoom: Number(RULES.tweak_default_zoom)||1.4,
+    diceAnimation: RULES.tweak_default_diceAnimation!==false,
   };
 }
 const TWEAK_DEFAULTS=/*EDITMODE-BEGIN*/{
@@ -761,7 +814,8 @@ const TWEAK_DEFAULTS=/*EDITMODE-BEGIN*/{
   "highlightEdge": true,
   "showLabels": true,
   "hideSymbols": false,
-  "zoom": 1.4
+  "zoom": 1.4,
+  "diceAnimation": true
 }/*EDITMODE-END*/;
 
 function createInitialBoats(numPlayers){
@@ -838,6 +892,23 @@ function App(){
       return()=>clearTimeout(t);
     }
   },[gs.phase,gs.movePts,gs.gameOver]);
+
+  // ── Animated dice roll resolver: when diceRolling=true & no result yet, pick after delay ───
+  useEffect(()=>{
+    if(gs.gameOver) return;
+    if(gs.phase!==4 || gs.diceResult || !gs.diceRolling) return;
+    const delay=tweaks.diceAnimation===false ? 80 : Number(RULES.dice_animation_ms||850);
+    const t=setTimeout(()=>{
+      setGs(p=>{
+        if(p.gameOver||p.phase!==4||p.diceResult||!p.diceRolling) return p;
+        const dr=DICE_MAP[Math.floor(Math.random()*6)];
+        const cml=diceStepsFor(dr);
+        return {...p, diceResult:dr, diceRolling:false, creatureMovesLeft:cml,
+          log:[...p.log.slice(-59),{type:'warn',text:`Dado: ${dr.toUpperCase()} — ${cml} mov. para la criatura.`}]};
+      });
+    }, delay);
+    return ()=>clearTimeout(t);
+  },[gs.phase,gs.diceResult,gs.diceRolling,gs.gameOver,tweaks.diceAnimation]);
 
   // ── Phase 2 auto-skip when active player has no live entities to move ─────
   useEffect(()=>{
@@ -1084,12 +1155,13 @@ function App(){
     clone.selectedExplorer=null; clone.selectedBoat=null;
     if(clone.phase===2) clone.movePts=RULES.move_points_per_turn;
     if(clone.phase===4){
-      // Auto-roll dice on entering Phase 4 if not already rolled
+      // Trigger animated dice roll — useEffect picks the result after the animation delay.
       if(!clone.diceResult){
-        clone.diceResult=DICE_MAP[Math.floor(Math.random()*6)];
-        clone.log=[...clone.log.slice(-59),{type:'warn',text:`Dado: ${clone.diceResult} (auto).`}];
+        clone.diceRolling=true;
+        clone.creatureMovesLeft=null;
+      } else {
+        clone.creatureMovesLeft=diceStepsFor(clone.diceResult);
       }
-      clone.creatureMovesLeft=diceStepsFor(clone.diceResult);
     }
     return clone;
   };
@@ -1378,31 +1450,21 @@ function App(){
           const onMainland=isMainlandCell(r,c);
           const newPts=prev.movePts-1;
 
-          // ── CASE A: explorer is on a boat → move the WHOLE boat (carries all passengers) ──
+          // ── CASE A: passenger-on-boat is selected ─────────────────────────────────
+          // Selecting a passenger applies actions to THAT passenger only:
+          //   · click adjacent sea (no boat)   → disembark passenger as swimmer (1 pt)
+          //   · click adjacent sea with boat   → transfer passenger to that boat (1 pt)
+          //   · click adjacent land tile        → disembark to land (1 pt)
+          //   · click adjacent mainland         → disembark + salvado (1 pt)
+          // Moving the WHOLE boat requires explicitly selecting the boat (not a passenger).
           if(expOnBoat){
-            // Majority-owner check: only the player with the most occupants (or tie) can move it.
-            if(targetSea && !canPlayerMoveBoat(expOnBoat, prev.explorers, prev.currentPlayer)){
-              const owners=boatMajorityOwners(expOnBoat, prev.explorers);
-              addLog(`Solo J${owners.join('/')} controla este barco (mayoría a bordo).`,'warn');
-              return prev;
-            }
             if(targetSea && !targetBoat){
-              // Boat moves to adjacent sea, carrying all passengers (1 movement point per move).
-              // Passengers DON'T spend their own move budget — they're just riding along.
-              // Auto-board any swimmer already at the target cell if there's still room.
-              const occIds=new Set(expOnBoat.explorers||[]);
-              const cap=expOnBoat.capacity||RULES.boat_capacity;
-              let nextExplorers=prev.explorers.map(x=>occIds.has(x.id)?{...x,r,c}:x);
-              const freeSpots=Math.max(0,cap-occIds.size);
-              const swimmersAtTarget=nextExplorers.filter(e=>e.r===r&&e.c===c&&e.state==='nadando'&&!occIds.has(e.id));
-              const boarders=swimmersAtTarget.slice(0,freeSpots);
-              boarders.forEach(b=>occIds.add(b.id));
-              if(boarders.length>0) addLog(`${boarders.length} nadador(es) suben al barco al llegar.`,'info');
-              const newBoats=prev.boats.map(b=>b.id===expOnBoat.id?{...b,r,c,explorers:[...occIds]}:b);
-              // Resolve creature collisions on the new cell (e.g. boat lands on serpent → destroyed).
-              const res=resolveCreatureCollisions(nextExplorers,newBoats,prev.creatures);
+              // Disembark passenger as a swimmer in adjacent sea.
+              const newBoats=prev.boats.map(b=>b.id===expOnBoat.id?{...b,explorers:(b.explorers||[]).filter(id=>id!==exp.id)}:b);
+              const newExplorers=prev.explorers.map(x=>x.id===exp.id?{...x,r,c,state:'nadando',hasMovedThisTurn:true}:x);
+              const res=resolveCreatureCollisions(newExplorers,newBoats,prev.creatures);
               if(res.log.length>0) res.log.forEach(t=>addLog(t,'error'));
-              addLog(`Barco (${occIds.size} exp.) → F${r+1}C${c+1}. ${newPts} pts restantes.`,'action');
+              addLog(`Tripulante J${prev.currentPlayer} baja al mar en F${r+1}C${c+1}. ${newPts} pts.`,'info');
               return{
                 ...base,
                 boats:res.boats, explorers:res.explorers, creatures:res.creatures,
@@ -1647,6 +1709,10 @@ function App(){
   const handleNextPhase=useCallback(()=>{
     setGs(prev=>{
       if(prev.gameOver)return prev;
+      // Phase 1 lock: if a hand card is mid-execution (pendingEffect with target flow), force completion first.
+      if(prev.phase===1 && prev.pendingEffect && typeof prev.pendingEffect==='object'){
+        return {...prev, log:[...prev.log.slice(-59),{type:'warn',text:`Termina de usar la ficha "${prev.pendingEffect.label||prev.pendingEffect.kind}" antes de avanzar.`}]};
+      }
       // Phase 3 is mandatory — cannot advance until a tile has been sunk.
       if(prev.phase===3 && !prev.phaseDone){
         return {...prev, log:[...prev.log.slice(-59),{type:'warn',text:'Debes hundir un terreno antes de avanzar.'}]};
@@ -1660,16 +1726,17 @@ function App(){
       // Phase 4 entry: auto-roll dice + set step counter for the matching creature.
       let diceResult=isNew?null:prev.diceResult;
       let creatureMovesLeft=isNew?null:prev.creatureMovesLeft;
+      let rolling=false;
       if(next===4){
-        diceResult = prev.diceResult || DICE_MAP[Math.floor(Math.random()*6)];
-        creatureMovesLeft = diceStepsFor(diceResult);
+        if(prev.diceResult){ diceResult=prev.diceResult; creatureMovesLeft=diceStepsFor(diceResult); }
+        else { rolling=true; }
       }
       const msg=isNew?`── Turno ${nt} — J${np} (${PLAYER_DATA[np].colorName}) ──`
-              : next===4 ? `Fase 4 — Dado: ${diceResult} (${creatureMovesLeft} mov.).`
+              : next===4 ? (rolling?`Fase 4 — Tirando dado…`:`Fase 4 — Dado: ${diceResult} (${creatureMovesLeft} mov.).`)
               : `Fase ${next} — ${PHASE_INFO[next-1].label}.`;
       return{...prev,phase:next,currentPlayer:np,turn:nt,
         movePts:RULES.move_points_per_turn,
-        diceResult,creatureMovesLeft,diceRolling:false,
+        diceResult,creatureMovesLeft,diceRolling:rolling,
         selectedExplorer:null,selectedCreature:null,selectedCell:null,selectedBoat:null,
         phaseDone:false,hands,explorers,
         log:[...prev.log.slice(-59),{type:'action',text:msg}]};
@@ -1884,6 +1951,7 @@ function App(){
           <TweakToggle label="Resaltar borde isla" value={tweaks.highlightEdge} onChange={v=>setTweaks(t=>({...t,highlightEdge:v}))} th={th}/>
           <TweakToggle label="Coordenadas" value={tweaks.showLabels} onChange={v=>setTweaks(t=>({...t,showLabels:v}))} th={th}/>
           <TweakToggle label="Ocultar símbolos hex" value={!!tweaks.hideSymbols} onChange={v=>setTweaks(t=>({...t,hideSymbols:v}))} th={th}/>
+          <TweakToggle label="Animar dado" value={tweaks.diceAnimation!==false} onChange={v=>setTweaks(t=>({...t,diceAnimation:v}))} th={th}/>
           <div style={{marginTop:12,fontSize:9,color:th.muted,textTransform:'uppercase',letterSpacing:'0.1em',marginBottom:6}}>Zoom tablero</div>
           <input type="range" min={0.6} max={1.4} step={0.05} value={tweaks.zoom} onChange={e=>setTweaks(t=>({...t,zoom:parseFloat(e.target.value)}))} style={{width:'100%',accentColor:th.accent}}/>
           <div style={{fontSize:10,color:th.muted,textAlign:'right',marginTop:3}}>{Math.round(tweaks.zoom*100)}%</div>
@@ -1974,12 +2042,11 @@ function App(){
             <button onClick={()=>{
               setGs(p=>{
                 if(p.gameOver) return {...p,revealedTile:null};
-                const diceResult=DICE_MAP[Math.floor(Math.random()*6)];
-                const creatureMovesLeft=diceStepsFor(diceResult);
+                // Trigger animated dice roll — useEffect resolves the result.
                 return{...p,phase:4,phaseDone:false,revealedTile:null,
-                  diceResult,creatureMovesLeft,diceRolling:false,
+                  diceResult:null,creatureMovesLeft:null,diceRolling:true,
                   selectedExplorer:null,selectedCreature:null,selectedBoat:null,
-                  log:[...p.log.slice(-59),{type:'action',text:`Fase 4 — Dado: ${diceResult} (${creatureMovesLeft} mov.).`}]};
+                  log:[...p.log.slice(-59),{type:'action',text:`Fase 4 — Tirando dado…`}]};
               });
             }} style={bS(th.accent)}>Continuar a Fase 4</button>
           </div>
