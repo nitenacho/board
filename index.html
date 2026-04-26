@@ -463,8 +463,13 @@ function SvgCreature({x,y,tipo,selected,onClick}){
   const cfg=CC[tipo]||{bg:'#888',brd:'#555',ic:'?'};
   return(
     <g transform={`translate(${x},${y})`} onClick={e=>{e.stopPropagation();onClick?.();}} style={{cursor:'pointer'}}>
-      <circle cx={0} cy={0} r={8} fill={cfg.bg} stroke={selected?'#fff':cfg.brd} strokeWidth={selected?2.5:1.5}/>
-      {selected&&<circle cx={0} cy={0} r={11} fill="none" stroke="#fff" strokeWidth={1} opacity={0.5}/>}
+      {selected && (
+        <>
+          <circle cx={0} cy={0} r={15} fill="rgba(34,211,238,0.25)" stroke="#22d3ee" strokeWidth={2.5} strokeDasharray="3 2"/>
+          <circle cx={0} cy={0} r={18} fill="none" stroke="#22d3ee" strokeWidth={1} opacity={0.5}/>
+        </>
+      )}
+      <circle cx={0} cy={0} r={8} fill={cfg.bg} stroke={selected?'#22d3ee':cfg.brd} strokeWidth={selected?2.8:1.5}/>
       <text x={0} y={3.5} textAnchor="middle" fontSize={9} fill="#fff" fontWeight="bold" fontFamily="sans-serif">{cfg.ic}</text>
     </g>
   );
@@ -1115,15 +1120,42 @@ function App(){
     }
     if(gs.phase===2&&gs.selectedBoat){
       const b=gs.boats.find(b=>b.id===gs.selectedBoat);
-      // Boats can only move into adjacent SEA cells (effective sea includes sunken tiles).
       if(b) getAdjacentCells(b.r,b.c).filter(([r,c])=>isEffectiveSea(r,c,gs.tiles)).forEach(([r,c])=>s.add(`${r},${c}`));
     }
     if(gs.phase===4&&gs.selectedCreature&&gs.diceResult){
       const cr=gs.creatures.find(c=>c.id===gs.selectedCreature);
       if(cr&&cr.r!==null) getAdjacentCells(cr.r,cr.c).filter(([r,c])=>isEffectiveSea(r,c,gs.tiles)).forEach(([r,c])=>s.add(`${r},${c}`));
     }
+    // ── Card flow indicators (Phase 1 pendingEffect) ──
+    if(gs.pendingEffect && typeof gs.pendingEffect==='object'){
+      const eff=gs.pendingEffect, k=eff.kind, tgt=gs.cardSelectedTarget;
+      // Step 2: destination after target picked
+      if(tgt && (k==='card_mvtiburon'||k==='card_mvballena'||k==='card_serpiente')){
+        // Any sea cell with no active creature
+        for(let r=0;r<BOARD_ROWS;r++) for(let c=0;c<BOARD_COLS;c++){
+          if(isEffectiveSea(r,c,gs.tiles) && !gs.creatures.some(cc=>cc.estado==='activo'&&cc.r===r&&cc.c===c)) s.add(`${r},${c}`);
+        }
+      }
+      else if(tgt && k==='card_delfin'){
+        const sw=gs.explorers.find(e=>e.id===tgt);
+        if(sw) for(let r=0;r<BOARD_ROWS;r++) for(let c=0;c<BOARD_COLS;c++){
+          if(hexDistance(sw.r,sw.c,r,c)>0 && hexDistance(sw.r,sw.c,r,c)<=3) s.add(`${r},${c}`);
+        }
+      }
+      else if(tgt && k==='card_vientos'){
+        const b=gs.boats.find(bb=>bb.id===tgt);
+        if(b) for(let r=0;r<BOARD_ROWS;r++) for(let c=0;c<BOARD_COLS;c++){
+          if(isEffectiveSea(r,c,gs.tiles) && hexDistance(b.r,b.c,r,c)>0 && hexDistance(b.r,b.c,r,c)<=3) s.add(`${r},${c}`);
+        }
+      }
+      else if(k==='card_remolino'){
+        for(let r=0;r<BOARD_ROWS;r++) for(let c=0;c<BOARD_COLS;c++){
+          if(isEffectiveSea(r,c,gs.tiles)) s.add(`${r},${c}`);
+        }
+      }
+    }
     return s;
-  },[gs.phase,gs.selectedExplorer,gs.selectedBoat,gs.selectedCreature,gs.diceResult,gs.explorers,gs.boats,gs.creatures,gs.tiles]);
+  },[gs.phase,gs.selectedExplorer,gs.selectedBoat,gs.selectedCreature,gs.diceResult,gs.explorers,gs.boats,gs.creatures,gs.tiles,gs.pendingEffect,gs.cardSelectedTarget]);
 
   const selectedInfo=useMemo(()=>{if(!gs.selectedCell)return null;const[r,c]=gs.selectedCell.split(',').map(Number);return{coord:`F${r+1} · C${c+1}`,tile:gs.tiles.find(t=>t.r===r&&t.c===c&&!t.removed),explorers:gs.explorers.filter(e=>e.r===r&&e.c===c&&e.state!=='salvado'&&e.state!=='eliminado'),creatures:gs.creatures.filter(cr=>cr.r===r&&cr.c===c&&cr.estado==='activo'),boats:gs.boats.filter(b=>b.r===r&&b.c===c)};},[gs.selectedCell,gs.tiles,gs.explorers,gs.creatures,gs.boats]);
 
@@ -1187,7 +1219,8 @@ function App(){
           if(prev.boats.some(b=>b.id!==boat.id&&b.r===r&&b.c===c)){addLog('Otro barco ocupa esa casilla.','warn');return prev;}
           const occIds=new Set(boat.explorers||[]);
           const newBoats=prev.boats.map(b=>b.id===boat.id?{...b,r,c}:b);
-          const newExplorers=prev.explorers.map(e=>occIds.has(e.id)?{...e,r,c,hasMovedThisTurn:true}:e);
+          // Vientos: boat ride doesn't burn passengers' own moves.
+          const newExplorers=prev.explorers.map(e=>occIds.has(e.id)?{...e,r,c}:e);
           const res=resolveCreatureCollisions(newExplorers,newBoats,prev.creatures);
           if(res.log.length>0) res.log.forEach(t=>addLog(t,'error'));
           addLog(`Vientos: barco → F${r+1}C${c+1}.`,'action');
@@ -1312,7 +1345,8 @@ function App(){
           }
           const occIds=new Set(boat.explorers||[]);
           const newPts=prev.movePts-1;
-          let newExplorers=prev.explorers.map(x=>occIds.has(x.id)?{...x,r,c,hasMovedThisTurn:true}:x);
+          // Boat ride doesn't consume passengers' own move budget.
+          let newExplorers=prev.explorers.map(x=>occIds.has(x.id)?{...x,r,c}:x);
           if(RULES.auto_board_on_enter_boat_cell){
             const cap=boat.capacity||RULES.boat_capacity;
             const swimmersAtTarget=newExplorers.filter(e=>e.r===r&&e.c===c&&e.state==='nadando'&&!occIds.has(e.id));
@@ -1332,11 +1366,12 @@ function App(){
           if(prev.movePts<=0){addLog('Máximo 3 movimientos alcanzado.','warn');return prev;}
           const exp=prev.explorers.find(x=>x.id===prev.selectedExplorer);
           if(!exp)return prev;
-          if(exp.state==='nadando' && exp.hasMovedThisTurn){
+          const expOnBoat=prev.boats.find(b=>(b.explorers||[]).includes(exp.id));
+          // Swimmer 1-move-per-turn cap applies ONLY when actually swimming in water (not when riding a boat).
+          if(exp.state==='nadando' && exp.hasMovedThisTurn && !expOnBoat){
             addLog('Un nadador solo puede moverse 1 casilla por turno.','warn');
             return prev;
           }
-          const expOnBoat=prev.boats.find(b=>(b.explorers||[]).includes(exp.id));
           const targetBoat=prev.boats.find(b=>b.r===r&&b.c===c);
           const targetSea=isEffectiveSea(r,c,prev.tiles);
           const onLand=isIslandCell(r,c)&&prev.tiles.find(t=>t.r===r&&t.c===c&&!t.removed);
@@ -1353,10 +1388,11 @@ function App(){
             }
             if(targetSea && !targetBoat){
               // Boat moves to adjacent sea, carrying all passengers (1 movement point per move).
+              // Passengers DON'T spend their own move budget — they're just riding along.
               // Auto-board any swimmer already at the target cell if there's still room.
               const occIds=new Set(expOnBoat.explorers||[]);
               const cap=expOnBoat.capacity||RULES.boat_capacity;
-              let nextExplorers=prev.explorers.map(x=>occIds.has(x.id)?{...x,r,c,hasMovedThisTurn:true}:x);
+              let nextExplorers=prev.explorers.map(x=>occIds.has(x.id)?{...x,r,c}:x);
               const freeSpots=Math.max(0,cap-occIds.size);
               const swimmersAtTarget=nextExplorers.filter(e=>e.r===r&&e.c===c&&e.state==='nadando'&&!occIds.has(e.id));
               const boarders=swimmersAtTarget.slice(0,freeSpots);
@@ -1682,7 +1718,12 @@ function App(){
   const saved=gs.explorers.filter(e=>e.state==='salvado').length;
 
   // Merge movable sets
-  const allMovable=useMemo(()=>{if(gs.phase===4&&gs.selectedCreature)return movableSet;if(gs.phase===2&&gs.selectedExplorer)return movableSet;return new Set();},[gs.phase,gs.selectedCreature,gs.selectedExplorer,movableSet]);
+  const allMovable=useMemo(()=>{
+    if(gs.phase===4&&gs.selectedCreature) return movableSet;
+    if(gs.phase===2&&(gs.selectedExplorer||gs.selectedBoat)) return movableSet;
+    if(gs.pendingEffect && typeof gs.pendingEffect==='object') return movableSet;
+    return new Set();
+  },[gs.phase,gs.selectedCreature,gs.selectedExplorer,gs.selectedBoat,gs.pendingEffect,movableSet]);
   const showRemovable=gs.phase===3||(tweaks.highlightEdge&&gs.phase!==2&&gs.phase!==4);
 
   return(
