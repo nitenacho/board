@@ -190,6 +190,7 @@ const RULES={
   serpent_steps: 1,
   boat_capacity: 3,
   shark_kills_adjacent_swimmer: true,
+  shark_kills_per_turn: 1,         // Max nadadores que un tiburón puede comer por turno
   auto_board_on_enter_boat_cell: true,
   whirlpool_radius: 1,           // 1 = center + 6 adjacents
   num_explorers_per_player: 10,
@@ -264,13 +265,14 @@ function sharksKillAdjacentSwimmers(explorers, creatures){
 }
 // Resolve all creature-on-target collisions for entities sharing cells.
 // Returns { explorers, boats, creatures, log } with collisions applied.
+// Sharks have a per-turn kill cap (RULES.shark_kills_per_turn, default 1) tracked in cr.killsThisTurn.
 function resolveCreatureCollisions(explorers, boats, creatures){
   const log=[];
   let nExp=explorers.slice(), nBoats=boats.slice(), nCreat=creatures.slice();
-  // Serpent: destroys boats (and all occupants) sharing its cell + any swimmer on the same cell.
   for(const cr of nCreat){
     if(cr.estado!=='activo'||cr.r===null) continue;
     if(cr.tipo==='Serpiente'){
+      // Serpiente devora barcos+tripulantes, nadadores Y ballenas en su misma celda.
       const boat=nBoats.find(b=>b.r===cr.r&&b.c===cr.c);
       if(boat){
         const occ=new Set(boat.explorers||[]);
@@ -284,22 +286,33 @@ function resolveCreatureCollisions(explorers, boats, creatures){
         nExp=nExp.map(e=>ids.has(e.id)?{...e,state:'eliminado'}:e);
         log.push(`Serpiente elimina ${ids.size} nadador(es).`);
       }
+      const whale=nCreat.find(c=>c.tipo==='Ballena'&&c.estado==='activo'&&c.r===cr.r&&c.c===cr.c);
+      if(whale){
+        nCreat=nCreat.map(c=>c.id===whale.id?{...c,r:null,c:null,estado:'reserva'}:c);
+        log.push(`Serpiente devora a una Ballena.`);
+      }
     }
     if(cr.tipo==='Ballena'){
       const boat=nBoats.find(b=>b.r===cr.r&&b.c===cr.c);
       if(boat){
         const occ=new Set(boat.explorers||[]);
-        nExp=nExp.map(e=>occ.has(e.id)?{...e,state:'nadando',r:cr.r,c:cr.c}:e);
+        nExp=nExp.map(e=>occ.has(e.id)?{...e,state:'nadando',r:cr.r,c:cr.c,hasMovedThisTurn:false}:e);
         nBoats=nBoats.filter(b=>b.id!==boat.id);
         log.push(`Ballena hunde barco; ${occ.size} pasajero(s) ahora nadan.`);
       }
     }
     if(cr.tipo==='Tiburon'){
-      const swimmers=nExp.filter(e=>e.r===cr.r&&e.c===cr.c&&e.state==='nadando');
-      if(swimmers.length>0){
-        const ids=new Set(swimmers.map(e=>e.id));
-        nExp=nExp.map(e=>ids.has(e.id)?{...e,state:'eliminado'}:e);
-        log.push(`Tiburón elimina ${ids.size} nadador(es).`);
+      // Tiburón come a lo sumo 1 nadador por turno (cap configurable).
+      const cap=Math.max(0, Number(RULES.shark_kills_per_turn ?? 1));
+      const used=cr.killsThisTurn||0;
+      if(used<cap){
+        const swimmers=nExp.filter(e=>e.r===cr.r&&e.c===cr.c&&e.state==='nadando');
+        if(swimmers.length>0){
+          const victim=swimmers[0];
+          nExp=nExp.map(e=>e.id===victim.id?{...e,state:'eliminado'}:e);
+          nCreat=nCreat.map(c=>c.id===cr.id?{...c,killsThisTurn:used+1}:c);
+          log.push(`Tiburón elimina nadador (J${victim.player}).`);
+        }
       }
     }
   }
@@ -1172,6 +1185,9 @@ function App(){
     clone.creatureMovesLeft=null;
     clone.selectedExplorer=null; clone.selectedCreature=null; clone.selectedCell=null; clone.selectedBoat=null;
     clone.explorers=clone.explorers.map(e=>({...e,hasMovedThisTurn:false}));
+    // Reset per-turn shark kill counter
+    clone.creatures=clone.creatures.map(c=>({...c,killsThisTurn:0}));
+    clone.pendingTurnStart={player:np,turn:clone.turn};
     clone.log=[...clone.log.slice(-59),{type:'action',text:`── Turno ${clone.turn} — J${np} ──`}];
     return clone;
   };
@@ -1186,13 +1202,24 @@ function App(){
 
   const movableSet=useMemo(()=>{
     const s=new Set();
-    if(gs.phase===2&&gs.selectedExplorer){
+    // Phase 2 → only when there ARE movement points available.
+    if(gs.phase===2 && (gs.movePts||0)>0 && gs.selectedExplorer){
       const e=gs.explorers.find(e=>e.id===gs.selectedExplorer);
-      if(e) getAdjacentCells(e.r,e.c).forEach(([r,c])=>s.add(`${r},${c}`));
+      const onBoat=e&&gs.boats.find(b=>(b.explorers||[]).includes(e.id));
+      // Swimmer cap blocks further moves UNLESS still on a boat (can disembark).
+      if(e && !(e.state==='nadando' && e.hasMovedThisTurn && !onBoat)){
+        getAdjacentCells(e.r,e.c).forEach(([r,c])=>s.add(`${r},${c}`));
+      }
     }
-    if(gs.phase===2&&gs.selectedBoat){
+    if(gs.phase===2 && (gs.movePts||0)>0 && gs.selectedBoat){
       const b=gs.boats.find(b=>b.id===gs.selectedBoat);
-      if(b) getAdjacentCells(b.r,b.c).filter(([r,c])=>isEffectiveSea(r,c,gs.tiles)).forEach(([r,c])=>s.add(`${r},${c}`));
+      // Only highlight if the player has majority control of this boat.
+      if(b && canPlayerMoveBoat(b, gs.explorers, gs.currentPlayer)){
+        getAdjacentCells(b.r,b.c)
+          .filter(([r,c])=>isEffectiveSea(r,c,gs.tiles))
+          .filter(([r,c])=>!gs.boats.some(bb=>bb.id!==b.id&&bb.r===r&&bb.c===c))
+          .forEach(([r,c])=>s.add(`${r},${c}`));
+      }
     }
     if(gs.phase===4&&gs.selectedCreature&&gs.diceResult){
       const cr=gs.creatures.find(c=>c.id===gs.selectedCreature);
@@ -1302,7 +1329,8 @@ function App(){
         // Remolino: place at clicked sea cell — destroys all in cell + 6 neighbours
         if(k==='card_remolino'){
           if(!isEffectiveSea(r,c,prev.tiles)){addLog('Remolino solo en mar.','warn');return prev;}
-          const kill=new Set([`${r},${c}`,...getSeaNeighbours(r,c).map(([a,b])=>`${a},${b}`)]);
+          // Full 7-cell ring (center + 6 adjacents, ignoring terrain so serpents/ballenas adyacentes mueren).
+          const kill=new Set([`${r},${c}`,...getAdjacentCells(r,c).map(([a,b])=>`${a},${b}`)]);
           let nExp=prev.explorers, nBoats=prev.boats, nCreat=prev.creatures;
           const doomedBoats=nBoats.filter(b=>kill.has(`${b.r},${b.c}`));
           const doomedOcc=new Set(doomedBoats.flatMap(b=>b.explorers||[]));
@@ -1354,38 +1382,18 @@ function App(){
           }};
         }
 
-        if(mover.tipo==='Serpiente' && boatHere){
-          const occ=new Set(boatHere.explorers||[]);
-          newExplorers=newExplorers.map(e=>occ.has(e.id)?{...e,state:'eliminado'}:e);
-          newBoats=newBoats.filter(b=>b.id!==boatHere.id);
-          addLog(`¡Serpiente destruye barco y tripulación! (${occ.size})`,'error');
-        }
-        else if(mover.tipo==='Ballena' && boatHere){
-          const occ=new Set(boatHere.explorers||[]);
-          newExplorers=newExplorers.map(e=>occ.has(e.id)?{...e,state:'nadando',r,c}:e);
-          newBoats=newBoats.filter(b=>b.id!==boatHere.id);
-          addLog(`Ballena hunde barco; ${occ.size} tripulantes ahora nadan.`,'warn');
-        }
-        else if(mover.tipo==='Tiburon' && swimmersHere.length>0){
-          const ids=new Set(swimmersHere.map(e=>e.id));
-          newExplorers=newExplorers.map(e=>ids.has(e.id)?{...e,state:'eliminado'}:e);
-          addLog(`Tiburón elimina ${ids.size} nadador(es).`,'error');
-        }
-
-        // Move creature
+        // Move creature first, then delegate to resolveCreatureCollisions for full kill rules.
         const newCreatures=prev.creatures.map(cr=>cr.id===prev.selectedCreature?{...cr,r,c}:cr);
-        // Shark-adjacency rule: any swimmer next to OR on a shark dies (incl. the shark we just moved).
-        const adjKills=new Set(sharksKillAdjacentSwimmers(newExplorers,newCreatures));
-        if(adjKills.size>0){
-          newExplorers=newExplorers.map(e=>adjKills.has(e.id)?{...e,state:'eliminado'}:e);
-          addLog(`Tiburón come ${adjKills.size} nadador(es) adyacente(s).`,'error');
-        }
+        const res=resolveCreatureCollisions(newExplorers,newBoats,newCreatures);
+        newExplorers=res.explorers; newBoats=res.boats;
+        const updatedCreatures=res.creatures;
+        if(res.log.length>0) res.log.forEach(t=>addLog(t,'error'));
 
         const left=(prev.creatureMovesLeft||1)-1;
         addLog(`${mover.tipo} → F${r+1}C${c+1}. ${left>0?left+' mov. restantes.':'sin movimientos.'}`);
         const after={
           ...base,
-          creatures:newCreatures,
+          creatures:updatedCreatures,
           explorers:newExplorers, boats:newBoats,
           selectedCreature: left>0 ? prev.selectedCreature : null,
           creatureMovesLeft: left,
@@ -1547,7 +1555,10 @@ function App(){
             addLog(`¡Explorador salvado! J${prev.currentPlayer} +${exp.value} pts (valor ${exp.value}).`,'action');
           }
           addLog(`J${prev.currentPlayer} → F${r+1}C${c+1} (${newState}). -${cost} pt${cost>1?'s':''}. ${ptsAfter} restantes.`);
-          let newExplorers=prev.explorers.map(x=>x.id===prev.selectedExplorer?{...x,r,c,state:newState,hasMovedThisTurn:true}:x);
+          // Swimmer cap "1 nado/turno" cuenta solo cuando la jugada FUE un nado en agua (start nadando).
+          // Caer al agua desde tierra deja al jugador con su movimiento de nado disponible.
+          const wasSwimmingMove = exp.state==='nadando' && newState==='nadando';
+          let newExplorers=prev.explorers.map(x=>x.id===prev.selectedExplorer?{...x,r,c,state:newState,hasMovedThisTurn: wasSwimmingMove ? true : x.hasMovedThisTurn}:x);
           // Auto-board when stepping onto a cell that already has a boat with room.
           let newBoats=prev.boats;
           const landingBoat = newExplorers.find(x=>x.id===exp.id) && prev.boats.find(b=>b.r===r&&b.c===c&&(b.explorers||[]).length<(b.capacity||RULES.boat_capacity));
@@ -1567,12 +1578,12 @@ function App(){
             scores:newScores,
           };
         }
-        // ── Cycle selection on a cell: own explorers → boat → none ────────
+        // ── Cycle selection on a cell: barco primero (manned o vacío) → exploradores ──
         const mine=prev.explorers.filter(e=>e.r===r&&e.c===c&&e.player===prev.currentPlayer&&e.state!=='salvado'&&e.state!=='eliminado');
         const boatHere=prev.boats.find(b=>b.r===r&&b.c===c);
         const cycle=[];
-        mine.forEach(e=>cycle.push({type:'exp',id:e.id,label:`Exp v${e.value}`}));
         if(boatHere) cycle.push({type:'boat',id:boatHere.id,label:`Barco (${(boatHere.explorers||[]).length}/${boatHere.capacity||3})`});
+        mine.forEach(e=>cycle.push({type:'exp',id:e.id,label:`Exp v${e.value}`}));
         if(cycle.length===0) return {...base,selectedExplorer:null,selectedBoat:null};
         let curIdx=-1;
         if(prev.selectedExplorer) curIdx=cycle.findIndex(x=>x.type==='exp'&&x.id===prev.selectedExplorer);
@@ -1629,8 +1640,9 @@ function App(){
               if(rv&&adj) newCreatures=newCreatures.map(c=>c.id===rv.id?{...c,r:adj[0],c:adj[1],estado:'activo'}:c);
             }
             else if(ac==='INM_Remolino'){
-              // Whirlpool: clears center + 6 adjacents. Kills swimmers, BOAT OCCUPANTS, sharks, whales.
-              const kill=new Set([`${r},${c}`, ...getSeaNeighbours(r,c).map(([a,b])=>`${a},${b}`)]);
+              // Whirlpool: clears center + ALL 6 hex-adjacents (regardless of original terrain).
+              // Includes adjacent island/mainland cells where serpents/whales might be standing.
+              const kill=new Set([`${r},${c}`, ...getAdjacentCells(r,c).map(([a,b])=>`${a},${b}`)]);
               const doomedBoats=newBoats.filter(b=>kill.has(`${b.r},${b.c}`));
               const doomedOccupants=new Set(doomedBoats.flatMap(b=>b.explorers||[]));
               newExplorers=newExplorers.map(e=>{
@@ -1639,8 +1651,9 @@ function App(){
                 return e;
               });
               newBoats=newBoats.filter(b=>!kill.has(`${b.r},${b.c}`));
-              newCreatures=newCreatures.map(c=>kill.has(`${c.r},${c.c}`)&&c.estado==='activo'&&(c.tipo==='Tiburon'||c.tipo==='Ballena'||c.tipo==='Serpiente')?{...c,r:null,c:null,estado:'reserva'}:c);
-              addLog(`Remolino: elimina nadadores, ${doomedBoats.length} barco(s) c/${doomedOccupants.size} tripulantes, y criaturas adyacentes.`,'error');
+              const killedCreatures=newCreatures.filter(c=>kill.has(`${c.r},${c.c}`)&&c.estado==='activo'&&(c.tipo==='Tiburon'||c.tipo==='Ballena'||c.tipo==='Serpiente'));
+              newCreatures=newCreatures.map(c=>killedCreatures.find(k=>k.id===c.id)?{...c,r:null,c:null,estado:'reserva'}:c);
+              addLog(`Remolino: ${doomedBoats.length} barco(s), ${doomedOccupants.size} tripulante(s), ${killedCreatures.length} criatura(s) eliminadas.`,'error');
             }
             // ── RED (to hand) tiles — goes to the current player's hand ─
             else if(ac==='MAN_Vientos'||ac==='MAN_Delfin'||ac==='MAN_Serpiente'||
@@ -1960,6 +1973,22 @@ function App(){
         </div>
       )}
 
+      {/* Turn Start Modal */}
+      {gsLive.pendingTurnStart && !gsLive.gameOver && (
+        <div style={{position:'absolute',inset:0,zIndex:295,background:'rgba(0,0,0,0.5)',backdropFilter:'blur(4px)',display:'flex',alignItems:'center',justifyContent:'center',animation:'fadeIn 0.25s'}}>
+          <div style={{textAlign:'center',padding:'26px 30px',maxWidth:380,width:'85%',background:th.bg,borderRadius:14,boxShadow:'0 20px 50px rgba(0,0,0,0.4)',border:`3px solid ${PLAYER_DATA[gsLive.pendingTurnStart.player]?.hex}`}}>
+            <div style={{fontSize:10,color:th.muted,textTransform:'uppercase',letterSpacing:'0.12em',marginBottom:6}}>Turno {String(gsLive.pendingTurnStart.turn).padStart(2,'0')}</div>
+            <svg width={64} height={84} viewBox="0 0 20 30" style={{marginBottom:6}}>
+              <circle cx={10} cy={6} r={5.5} fill={PLAYER_DATA[gsLive.pendingTurnStart.player]?.hex}/>
+              <path d={`M3.5 14 Q1 20 4.5 24 L8 24 L8 29 L12 29 L12 24 L15.5 24 Q19 20 16.5 14 Q13.5 11 10 11 Q6.5 11 3.5 14Z`} fill={PLAYER_DATA[gsLive.pendingTurnStart.player]?.hex}/>
+            </svg>
+            <div style={{fontSize:20,fontWeight:800,color:th.text,marginBottom:2}}>{PLAYER_DATA[gsLive.pendingTurnStart.player]?.name}</div>
+            <div style={{fontSize:12,color:PLAYER_DATA[gsLive.pendingTurnStart.player]?.hex,fontWeight:700,marginBottom:18}}>{PLAYER_DATA[gsLive.pendingTurnStart.player]?.colorName}</div>
+            <button onClick={()=>setGs(p=>({...p,pendingTurnStart:null}))} style={bS(PLAYER_DATA[gsLive.pendingTurnStart.player]?.hex||th.accent)}>▶ Empezar Turno</button>
+          </div>
+        </div>
+      )}
+
       {/* Defense Token Modal */}
       {gsLive.pendingDefense && (
         <div style={{position:'absolute',inset:0,zIndex:290,background:'rgba(0,0,0,0.65)',backdropFilter:'blur(4px)',display:'flex',alignItems:'center',justifyContent:'center',animation:'fadeIn 0.25s'}}>
@@ -2069,7 +2098,27 @@ function App(){
                 </div>);
               })}
             </div>
-            <button onClick={()=>newGame()} style={bS('#2563eb')}>🏝 Nueva Partida</button>
+            <div style={{display:'flex',gap:8}}>
+              <button onClick={()=>newGame()} style={{...bS('#2563eb'),flex:1}}>🏝 Nueva Partida</button>
+              <button onClick={()=>{
+                const lines=[`The Island — Turno ${gs.turn}`];
+                Array.from({length:gs.numPlayers},(_,i)=>i+1).forEach(p=>{
+                  const pd=PLAYER_DATA[p];
+                  lines.push(`${pd.colorName} (J${p}): ${gs.scores[p]||0} pts`);
+                });
+                const winner=Array.from({length:gs.numPlayers},(_,i)=>i+1).reduce((a,b)=>(gs.scores[b]||0)>(gs.scores[a]||0)?b:a,1);
+                lines.push(`🏆 Ganador: ${PLAYER_DATA[winner].colorName} (J${winner})`);
+                lines.push(`Jugado en https://nitenacho.github.io/board/`);
+                const text=lines.join('\n');
+                if(navigator.share){
+                  navigator.share({title:'The Island',text}).catch(()=>{});
+                } else if(navigator.clipboard){
+                  navigator.clipboard.writeText(text).then(()=>alert('Resultado copiado al portapapeles.')).catch(()=>{});
+                } else {
+                  alert(text);
+                }
+              }} style={{...bS('transparent',th.text,th.border),flex:1}}>📤 Compartir</button>
+            </div>
           </div>
         </div>
       )}
