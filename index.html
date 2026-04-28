@@ -874,6 +874,16 @@ function App(){
   const[tweaks,setTweaks]=useState(()=>{try{return JSON.parse(localStorage.getItem('island_tweaks'))||{...TWEAK_DEFAULTS};}catch{return{...TWEAK_DEFAULTS};}});
   const[dark,setDark]=useState(()=>{try{return JSON.parse(localStorage.getItem('island_dark'))||false;}catch{return false;}});
   const[showTweaks,setShowTweaks]=useState(false);
+  const[isFullscreen,setIsFullscreen]=useState(false);
+  useEffect(()=>{
+    const onChange=()=>setIsFullscreen(!!document.fullscreenElement);
+    document.addEventListener('fullscreenchange',onChange);
+    return()=>document.removeEventListener('fullscreenchange',onChange);
+  },[]);
+  const toggleFullscreen=()=>{
+    if(!document.fullscreenElement){document.documentElement.requestFullscreen().catch(()=>{});}
+    else{document.exitFullscreen().catch(()=>{});}
+  };
   // ── Simulator + history ──
   const[simulating,setSimulating]=useState(false);
   const[simSpeed,setSimSpeed]=useState(650);   // ms per auto-action
@@ -1821,6 +1831,14 @@ function App(){
             <TopStat label="Salvados" value={saved} color="#86efac"/>
           </div>
           <div style={{display:'flex',gap:6}}>
+            <button onClick={toggleFullscreen} title={isFullscreen?'Salir de pantalla completa':'Pantalla completa'} style={{background:'rgba(255,255,255,0.12)',border:'1px solid rgba(255,255,255,0.25)',borderRadius:4,padding:'4px 8px',color:'#fff',cursor:'pointer',lineHeight:1,display:'flex',alignItems:'center',justifyContent:'center'}}>
+              <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                {isFullscreen
+                  ?<><polyline points="8 3 3 3 3 8"/><polyline points="21 8 21 3 16 3"/><polyline points="3 16 3 21 8 21"/><polyline points="16 21 21 21 21 16"/></>
+                  :<><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><polyline points="21 3 14 10"/><polyline points="3 21 10 14"/></>
+                }
+              </svg>
+            </button>
             <button onClick={()=>setDark(d=>!d)} style={{background:'rgba(255,255,255,0.12)',border:'1px solid rgba(255,255,255,0.25)',borderRadius:4,padding:'4px 10px',fontSize:10,color:'#fff',cursor:'pointer',fontFamily:'inherit',fontWeight:600,letterSpacing:'0.05em'}}>
               {dark?'☀ Claro':'🌙 Oscuro'}
             </button>
